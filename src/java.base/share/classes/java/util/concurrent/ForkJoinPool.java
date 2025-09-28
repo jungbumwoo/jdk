@@ -72,6 +72,9 @@ import static java.util.concurrent.DelayScheduler.ScheduledForkJoinTask;
  * tasks that are never joined. All worker threads are initialized
  * with {@link Thread#isDaemon} set {@code true}.
  *
+ * 생성자에 asyncMode=true 시, join() 으로 결과를 기다리지 않음. 비동기 이벤트 테스크에도 유용 (jb)
+ * 안기다리면 어떻게 된다는거지?
+ *
  * <p>A static {@link #commonPool()} is available and appropriate for
  * most applications. The common pool is used by any ForkJoinTask that
  * is not explicitly submitted to a specified pool. Using the common
@@ -135,6 +138,7 @@ import static java.util.concurrent.DelayScheduler.ScheduledForkJoinTask;
  *  </tr>
  * </table>
  *
+ * 실행 delay 기능도 지원하네? (jb)
  * <p>Additionally, this class supports {@link
  * ScheduledExecutorService} methods to delay or periodically execute
  * tasks, as well as method {@link #submitWithTimeout} to cancel tasks
@@ -197,11 +201,22 @@ import static java.util.concurrent.DelayScheduler.ScheduledForkJoinTask;
  * @since 1.7
  * @author Doug Lea
  */
+/*
+* ForkJoinTask(작게 쪼갤 수 있는 작업)를 돌리도록 만든 ExecutorService의 한 구현체
+* 일반 코드(=ForkJoinTask가 아닌 클라이언트)에서도 작업을 제출을 제공하고, 풀의 관리/모니터링 기능 제공
+* work-Stealing: 각 워커 스레드가 자기 덱(deque)을 갖고, 일이 없으면 남의 덱에서 뒤쪽 작업을 ‘훔쳐와(steal)’ 실행
+* 작게 쪼개지고(fork) 다시 합쳐지는(join) 패턴에서 부하가 골고루 분산됨.
+* 아주 작은 작업(수많은 단위 작업) 을 외부에서 마구 넣어도 낭비가 적고 효율적.
+*
+* */
 public class ForkJoinPool extends AbstractExecutorService
     implements ScheduledExecutorService {
 
     /*
      * Implementation Overview
+     *
+     * 쪼개고 work-stealing 하면 특정 스레드가 깨어나길 기다리는 work dealing 보다 처리량이 보통 좋다 (jb)
+     * random-stealing -> 특정 큐에 치우치지 않게 하여 처리량(throughput) 상승
      *
      * This class and its nested classes provide the main
      * functionality and control for a set of worker threads.  Because
@@ -253,6 +268,13 @@ public class ForkJoinPool extends AbstractExecutorService
      *
      * WorkQueues
      * ==========
+     *
+     * 각 워커 스레드가 하나씩 갖는 양끝 큐(Deque)
+     * push: 내 큐의 뒤(top)에 넣기 (오너 스레드만)
+     * pop: 내 큐의 뒤(top)에서 빼기 (오너 스레드만)
+     * poll(=steal): 다른 스레드가 반대쪽 앞(base) 에서 stealing
+     * owner: LIFO / stealing: FIFO / 슬롯 CAS / 즉시 null-out (GC 성능)
+     *
      *
      * Most operations occur within work-stealing queues (in nested
      * class WorkQueue).  These are special forms of Deques that
@@ -314,6 +336,7 @@ public class ForkJoinPool extends AbstractExecutorService
      *   if (CAS nonnull task t = q.array[k = q.base % length] to null)
      *       increment base and return task;
      *
+     * 여기 아래 However 쪽은 skip 함 나중에 다시 챙겨보자 (jb)
      * However, there are several more cases that must be dealt with.
      * Some of them are just due to asynchrony; others reflect
      * contention and stealing policies. Stepping through them
@@ -368,22 +391,30 @@ public class ForkJoinPool extends AbstractExecutorService
      *    shifts) that can be detected with a secondary recheck that
      *    is less likely to conflict with owner writes.
      *
+     * 상황에 따라 poll, runWorker, helpJoin 동작 방식이 다름 (jb)
      * The poll operations in q.poll(), runWorker(), helpJoin(), and
      * elsewhere differ with respect to whether other queues are
      * available to try, and the presence or nature of screening steps
-     * when only some kinds of tasks can be taken. When alternatives
-     * (or failing) is an option, they uniformly give up after
+     * when only some kinds of tasks can be taken.
+     *
+     *
+     * stall(비어있거나), CAS 시도하다가 다음 큐로 이동. 경합 완화 (jb)
+     * When alternatives (or failing) is an option, they uniformly give up after
      * bounded numbers of stalls and/or CAS failures, which reduces
      * contention when too many workers are polling too few tasks.
+     *
      * Overall, in the aggregate, we ensure probabilistic
      * non-blockingness of work-stealing at least until checking
      * quiescence (which is intrinsically blocking): If an attempted
      * steal fails in these ways, a scanning thief chooses a different
-     * target to try next. In contexts where alternatives aren't
+     * target to try next.
+     *
+     * In contexts where alternatives aren't
      * available, and when progress conditions can be isolated to
      * values of a single variable, simple spinloops (using
      * Thread.onSpinWait) are used to reduce memory traffic.
      *
+     * 워커 큐와 제출 큐가 분리되어 있음 (jb)
      * WorkQueues are also used in a similar way for tasks submitted
      * to the pool. We cannot mix these tasks in the same queues used
      * by workers. Instead, we randomly associate submission queues
@@ -511,6 +542,10 @@ public class ForkJoinPool extends AbstractExecutorService
      * allocation. On the other hand, throughput degrades when too
      * many threads poll for too few tasks. (See below.)
      *
+     *
+     * ctl field에 released vs unreleased counting. (jb)
+     * released: 작업 찾거나, 작업 수행 중 (run / scan)
+     *
      * The "ctl" field atomically maintains total and "released"
      * worker counts, plus the head of the available worker queue
      * (actually stack, represented by the lower 32bit subfield of
@@ -559,6 +594,7 @@ public class ForkJoinPool extends AbstractExecutorService
      * signalWork invocations are prefaced with a fully fenced memory
      * access (which is usually needed anyway).
      *
+     * signalWork: 새 워커를 만들거나 워커를 깨워 스캔을 시작하게 하는 동작 (jb)
      * Signalling. Signals (in signalWork) cause new or reactivated
      * workers to scan for tasks.  Method signalWork and its callers
      * try to approximate the unattainable goal of having the right
@@ -612,6 +648,11 @@ public class ForkJoinPool extends AbstractExecutorService
      *
      * * Despite these, signal contention and overhead effects still
      *   occur during ramp-up and ramp-down of small computations.
+
+     * 큐 스캔 : “pseudo-random permutation.” (jb)
+     * 워커는 여러 WorkQueue 배열을 의사난수 순서로 훑습니다.
+     * 시작 인덱스를 하나 정하고, 고정된 보폭(stride) 으로 원형 배열을 한 바퀴 빠짐없이 도는 방식(예: 길이와 서로소인 보폭을 계속 더함).
+     * 이렇게 하면 모든 큐를 한 번씩 시도하면서도, 매번 순서가 섞인 효과
      *
      * Scanning. Method runWorker performs top-level scanning for (and
      * execution of) tasks by polling a pseudo-random permutation of
@@ -634,6 +675,12 @@ public class ForkJoinPool extends AbstractExecutorService
      * (which also reduces contention when too many workers try to
      * take small tasks from the same queue).
      *
+     * Deactivation. 여기 좀 신기함.
+     * 특정 cost 높은 과정을 마지막으로 진행하기 전에 여러 번 확인하고 확실하면 최종 반영하는 그런 mechanism으로 만들어 둔 듯.
+     * 알아두면 쓸일 있지 않을까? (jb)
+     * task 없으면 deactivate() 함. 헌데 경합이 생기면 deactivate를 포기하고 다시 스캔
+     * deactivation 되는 동안 missed signal이 있으면, 다시 scan & re-active
+     * quiescent (여러 번 스캔) 하고 나서, reactivate 시킴.
      * Deactivation. When no tasks are found by a worker in runWorker,
      * it tries to deactivate()), giving up (and rescanning) on "ctl"
      * contention. To avoid missed signals during deactivation, the
@@ -726,6 +773,10 @@ public class ForkJoinPool extends AbstractExecutorService
      * InterruptibleTasks, that guarantee that callers do not execute
      * submitted tasks.
      *
+     * InterruptibleTasks의 task는 caller가 실행할 수도, 실행하지 않을 수도 있다.
+     * work stealing queue 이다보니 당연한거 아닌가? 또 다른 맥락에서 말하나? (jb)
+     *
+     * * extended spin/block scheme *: 스핀으로 확인하다가 필요시 block(park) 된다는 뜻 (jb)
      * The basic structure of joining is an extended spin/block scheme
      * in which workers check for task completions status between
      * steps to find other work, until relevant pool state stabilizes
@@ -733,6 +784,7 @@ public class ForkJoinPool extends AbstractExecutorService
      * point blocking. This is usually a good choice of when to block
      * that would otherwise be harder to approximate.
      *
+     * 스택에 쌓이겠지만 최대치 안넘게 설계되어있다는 뜻 (jb)
      * These forms of helping may increase stack space usage, but that
      * space is bounded in tree/dag structured procedurally parallel
      * designs to be no more than that if a task were executed only by
@@ -750,6 +802,7 @@ public class ForkJoinPool extends AbstractExecutorService
      * scanning. This cost is still very much worthwhile because of
      * its impact on task scheduling and resource control.
      *
+     * 훔쳐갈 때 helpJoin, Linear helping 방식을 얘기하는데 코드를 같이 봐야 이해가 갈듯 (jb)
      * The two methods for finding and executing subtasks vary in
      * details.  The algorithm in helpJoin entails a form of "linear
      * helping".  Each worker records (in field "source") the index of
@@ -828,6 +881,11 @@ public class ForkJoinPool extends AbstractExecutorService
      * Common Pool
      * ===========
      *
+     * 가벼운 사용(병렬 스트림·소규모 태스크): 그냥 commonPool() 그대로 OK.
+     * 격리·정책 튜닝 필요(블로킹 I/O 포함, 다른 워크로드와 간섭 우려): 커스텀 ForkJoinPool 권장.
+     * 언제 commonPool 쓰고, 언제 커스텀 쓸지 실 예시 찾아봐도 괜찮을듯  (jb)
+     *
+     * todo: 오호 static initialization 찾아볼 것 (jb)
      * The static common pool always exists after static
      * initialization.  Since it (or any other created pool) need
      * never be used, we minimize initial construction overhead and
@@ -838,6 +896,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * classes).  It also has PRESET_SIZE config set if parallelism
      * was configured by system property.
      *
+     * poll paralleism level 설정할 때 참고 (jb)
+     * 메인/서비스 스레드가 join에 들어올 여지가 크다면 parallesim level 약간 낮게 잡아도 성능이 잘 나올 수 있어보임
      * When external threads use the common pool, they can perform
      * subtask processing (see helpComplete and related methods) upon
      * joins, unless they are submitted using ExecutorService
@@ -849,6 +909,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * task, which fails quickly if the caller did not fork to common
      * pool.
      *
+     * parallelism 0 일 때 동작을 설명하는데 코드레벨까지 파악되야 내용이 다 이해될듯 (jb)
+     * 0 으로 놓고 쓰는 경우는 어떨 경우일까 싶다.
      * Guarantees for common pool parallelism zero are limited to
      * tasks that are joined by their callers in a tree-structured
      * fashion or use CountedCompleters (as is true for jdk
@@ -862,6 +924,7 @@ public class ForkJoinPool extends AbstractExecutorService
      * ensure at least one worker, but due to other backward
      * compatibility contraints, ensures two.)
      *
+     * default로는 commonPool을 InnocuousForkJoinWorkerThread 를 worker로 사용
      * As a more appropriate default in managed environments, unless
      * overridden by system properties, we use workers of subclass
      * InnocuousForkJoinWorkerThread for the commonPool.  These
@@ -873,6 +936,10 @@ public class ForkJoinPool extends AbstractExecutorService
      *
      * InterruptibleTasks
      * ====================
+     *
+     * Interrupt 안되는 Task 도 있나? 왜 굳이 InterruptibleTask 라고 해놨지? (jb)
+     * 그만큼 중요한 개념이라 붙여놨나
+     * 외부에서 Interrupt 할 수 없고 내부적으로 발생함.
      *
      * Regular ForkJoinTasks manage task cancellation (method cancel)
      * independently from the interrupt status of threads running
@@ -909,6 +976,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * calls to get(), but is otherwise wrapped in a (checked)
      * ExecutionException.
      *
+     * Worker thread는 ForkJoinPool이 보유한 플랫폼 스레드. virtualThread가 아님.
+     * virtual thread bodies: task를 의미하는 듯.
+     * Task: 워커가 실행하는 작업 단위임.
      * Worker Threads cannot be VirtualThreads, as enforced by
      * requiring ForkJoinWorkerThreads in factories.  There are
      * several constructions relying on this.  However as of this
@@ -939,6 +1009,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * Memory placement
      * ================
      *
+     * todo: false-sharing? @Contended?
+     *
      * Performance is very sensitive to placement of instances of
      * ForkJoinPool and WorkQueues and their queue arrays, as well as
      * the placement of their fields. Caches misses and contention due
@@ -965,6 +1037,19 @@ public class ForkJoinPool extends AbstractExecutorService
      * updated by owners from those most commonly read by stealers or
      * other management.
      *
+     * Small Array vs Large Array
+     * Small Arrays
+     * 장점: locality 증가, GC scan time 감소
+     * 단점: reduce the number of resizes, which require atomic transfers.
+     *
+     * Large Array
+     * 장점: false sharing 감소, GC 부가(카드마크 등)로 인한 간접 충돌 감소, 리사이즈 횟수 감소
+     *
+     * 성능 관련:
+     * 성능 튜닝 시 캐시 라인 충돌/false sharing 체크
+     * 공유되는 핫 필드 물리적으로 떼어놓기(패딩/분리) - 여기선 ctl
+     * 배열: Resize 최소화 하면서 작은 사이즈로
+     *
      * Initial sizing and resizing of WorkQueue arrays is an even more
      * delicate tradeoff because the best strategy systematically
      * varies across garbage collectors. Small arrays are better for
@@ -982,6 +1067,7 @@ public class ForkJoinPool extends AbstractExecutorService
      *
      * Style notes
      * ===========
+     * 코드 스타일이나 코드 전반에 대한 설명이라 아직 다 이해안됨 (jb)
      *
      * Memory ordering relies mainly on atomic operations (CAS,
      * getAndSet, getAndAdd) along with moded accesses. These use

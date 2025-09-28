@@ -148,6 +148,8 @@ import java.util.List;
  * @since 1.5
  * @author Doug Lea
  */
+// 비동기(혹은 병렬) 작업을 실행·관리해 주는 스레드 풀 인터페이스
+// 직접 스레드를 만들고 관리(new Thread(...))하는 대신, 작업(Runnable/Callable)을 제출하면 풀에 있는 워커 스레드들이 알아서 실행
 public interface ExecutorService extends Executor, AutoCloseable {
 
     /**
