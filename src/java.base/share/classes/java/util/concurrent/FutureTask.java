@@ -120,7 +120,9 @@ public class FutureTask<V> implements RunnableFuture<V> {
         if (s == NORMAL)
             return (V)x;
         if (s >= CANCELLED)
+            // (jb) INTERRUPTING, INTERRUPTED 되어도 CancelException;
             throw new CancellationException();
+        // (jb) return x 변수를 Object에 return 값, throwable Error 둘 다 할당할 수 있도록 된게 인상적
         throw new ExecutionException((Throwable)x);
     }
 
@@ -269,6 +271,7 @@ public class FutureTask<V> implements RunnableFuture<V> {
         }
     }
 
+    // (jb) override 하라고 선택지 열어둠. Done을 어떻게 정의할지 선택해서 구현가능하겠네
     /**
      * Protected method invoked when this task transitions to state
      * {@code isDone} (whether normally or via cancellation). The
@@ -489,9 +492,11 @@ public class FutureTask<V> implements RunnableFuture<V> {
                 q = new WaitNode();
             }
             else if (!queued)
+                // wait node에 추가
                 queued = WAITERS.weakCompareAndSet(this, q.next = waiters, q);
             else if (timed) {
                 final long parkNanos;
+                // (jb) timed 가 생성 시점이 아니라 awaisDone 호출 시점 부터 카운팅 됨.
                 if (startTime == 0L) { // first time
                     startTime = System.nanoTime();
                     if (startTime == 0L)
@@ -507,6 +512,8 @@ public class FutureTask<V> implements RunnableFuture<V> {
                 }
                 // nanoTime may be slow; recheck before parking
                 if (state < COMPLETING)
+                    // (jb) TIMED_WAITING 상태 로 일시 정지시킴
+                    // 다른 스레드가 unpark() 메서드를 호출하거나 interrupt() 메서드를 호출하여 현재 스레드를 깨울 수 있음
                     LockSupport.parkNanos(this, parkNanos);
             }
             else

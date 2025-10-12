@@ -41,7 +41,10 @@ package java.util.concurrent;
  * complete, to wait for its completion, and to retrieve the result of
  * the computation.  The result can only be retrieved using method
  * {@code get} when the computation has completed, blocking if
- * necessary until it is ready.  Cancellation is performed by the
+ * necessary until it is ready.
+ *
+ * Cancel 호출 안해주면 계속 쌓일 수 있는건가? (jb)
+ * Cancellation is performed by the
  * {@code cancel} method.  Additional methods are provided to
  * determine if the task completed normally or was cancelled. Once a
  * computation has completed, the computation cannot be cancelled.
@@ -49,6 +52,23 @@ package java.util.concurrent;
  * of cancellability but not provide a usable result, you can
  * declare types of the form {@code Future<?>} and
  * return {@code null} as a result of the underlying task.
+ *
+ * abruptly 뜻: 갑자기
+ *
+ * (jb)
+ * future.cancel(...)을 호출하면(성공 시) isCancelled() =  true
+ * 이미 끝났든(cancel/정상완료/예외) 어쨌든 이후엔 isDone() = true
+ * 작업이 아직 시작 전이었다면, ExecutorService가 그 작업을 실행하지 못하게 억제(suppress) 됨
+ *
+ * cancel(true)처럼 mayInterruptIfRunning = true 면, 이미 실행 중인 스레드에 인터럽트를 겁니다.
+ *
+ * 블로킹 I/O, BlockingQueue.take() 같은 인터럽트에 반응하는 호출을 쓰거나,
+ * 루프 중 Thread.interrupted() 를 체크해야 함
+ * 이렇게 하면 작업이 언블록되고 즉시 종료하는 관례를 지킬 수 있음
+ *
+ * 가능하면 isDone()도 함께 확인해서 “정말 이 Future가 끝난(취소 포함) 상태인지”를 확인 하라는 권고
+ *
+ * isDone() 호출 후에는 isCancelled 호출이 안되나? 왜 "unless already isDone()" 이라고 해둔거지?
  *
  * <p>Cancellation of a Future need not abruptly terminate its
  * computation. Method {@code cancel} causes {@code isCancelled()} to
@@ -108,6 +128,7 @@ package java.util.concurrent;
 public interface Future<V> {
 
     /**
+     * cancel 호출해도 cancelled 가 안될 수도 있네 (jb)
      * Attempts to cancel execution of this task.  This method has no
      * effect if the task is already completed or cancelled, or could
      * not be cancelled for some other reason.  Otherwise, if this
