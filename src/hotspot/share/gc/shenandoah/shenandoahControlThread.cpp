@@ -43,7 +43,8 @@
 ShenandoahControlThread::ShenandoahControlThread() :
   ShenandoahController(),
   _requested_gc_cause(GCCause::_no_gc),
-  _degen_point(ShenandoahGC::_degenerated_outside_cycle) {
+  _degen_point(ShenandoahGC::_degenerated_outside_cycle),
+  _control_lock(CONTROL_LOCK_RANK, "ShenandoahControl_lock", true) {
   set_name("Shenandoah Control Thread");
   create_and_start();
 }
@@ -58,6 +59,7 @@ void ShenandoahControlThread::run_service() {
 
   ShenandoahCollectorPolicy* const policy = heap->shenandoah_policy();
   ShenandoahHeuristics* const heuristics = heap->heuristics();
+  double most_recent_wake_time = os::elapsedTime();
   while (!should_terminate()) {
     const GCCause::Cause cancelled_cause = heap->cancelled_cause();
     if (cancelled_cause == GCCause::_shenandoah_stop_vm) {
@@ -221,14 +223,26 @@ void ShenandoahControlThread::run_service() {
     // Wait before performing the next action. If allocation happened during this wait,
     // we exit sooner, to let heuristics re-evaluate new conditions. If we are at idle,
     // back off exponentially.
-    const double current = os::elapsedTime();
+    const double before_sleep = most_recent_wake_time;
     if (heap->has_changed()) {
       sleep = ShenandoahControlIntervalMin;
-    } else if ((current - last_sleep_adjust_time) * 1000 > ShenandoahControlIntervalAdjustPeriod){
+    } else if ((before_sleep - last_sleep_adjust_time) * 1000 > ShenandoahControlIntervalAdjustPeriod){
       sleep = MIN2<int>(ShenandoahControlIntervalMax, MAX2(1, sleep * 2));
-      last_sleep_adjust_time = current;
+      last_sleep_adjust_time = before_sleep;
     }
-    os::naked_short_sleep(sleep);
+    MonitorLocker ml(&_control_lock, Mutex::_no_safepoint_check_flag);
+    ml.wait(sleep);
+    // Record a conservative estimate of the longest anticipated sleep duration until we sample again.
+    double planned_sleep_interval = MIN2<int>(ShenandoahControlIntervalMax, MAX2(1, sleep * 2)) / 1000.0;
+    most_recent_wake_time = os::elapsedTime();
+    heuristics->update_should_start_query_times(most_recent_wake_time, planned_sleep_interval);
+    if (LogTarget(Debug, gc, thread)::is_enabled()) {
+      double elapsed = most_recent_wake_time - before_sleep;
+      double hiccup = elapsed - double(sleep);
+      if (hiccup > 0.001) {
+        log_debug(gc, thread)("Control Thread hiccup time: %.3fs", hiccup);
+      }
+    }
   }
 }
 
@@ -343,6 +357,16 @@ void ShenandoahControlThread::request_gc(GCCause::Cause cause) {
   }
 }
 
+void ShenandoahControlThread::notify_control_thread(GCCause::Cause cause) {
+  // Although setting gc request is under _controller_lock, the read side (run_service())
+  // does not take the lock. We need to enforce following order, so that read side sees
+  // latest requested gc cause when the flag is set.
+  MonitorLocker controller(&_control_lock, Mutex::_no_safepoint_check_flag);
+  _requested_gc_cause = cause;
+  _gc_requested.set();
+  controller.notify();
+}
+
 void ShenandoahControlThread::handle_requested_gc(GCCause::Cause cause) {
   if (should_terminate()) {
     log_info(gc)("Control thread is terminating, no more GCs");
@@ -354,8 +378,7 @@ void ShenandoahControlThread::handle_requested_gc(GCCause::Cause cause) {
   // The whitebox caller thread will arrange for itself to wait until the GC notifies
   // it that has reached the requested breakpoint (phase in the GC).
   if (cause == GCCause::_wb_breakpoint) {
-    _requested_gc_cause = cause;
-    _gc_requested.set();
+    notify_control_thread(cause);
     return;
   }
 
@@ -372,12 +395,7 @@ void ShenandoahControlThread::handle_requested_gc(GCCause::Cause cause) {
   size_t current_gc_id = get_gc_id();
   size_t required_gc_id = current_gc_id + 1;
   while (current_gc_id < required_gc_id && !should_terminate()) {
-    // Although setting gc request is under _gc_waiters_lock, but read side (run_service())
-    // does not take the lock. We need to enforce following order, so that read side sees
-    // latest requested gc cause when the flag is set.
-    _requested_gc_cause = cause;
-    _gc_requested.set();
-
+    notify_control_thread(cause);
     ml.wait();
     current_gc_id = get_gc_id();
   }

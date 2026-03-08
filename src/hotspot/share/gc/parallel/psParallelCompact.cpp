@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,7 +28,9 @@
 #include "classfile/symbolTable.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "code/codeCache.hpp"
+#include "code/nmethod.hpp"
 #include "compiler/oopMap.hpp"
+#include "cppstdlib/new.hpp"
 #include "gc/parallel/objectStartArray.inline.hpp"
 #include "gc/parallel/parallelArguments.hpp"
 #include "gc/parallel/parallelScavengeHeap.inline.hpp"
@@ -43,6 +45,7 @@
 #include "gc/parallel/psStringDedup.hpp"
 #include "gc/parallel/psYoungGen.hpp"
 #include "gc/shared/classUnloadingContext.hpp"
+#include "gc/shared/collectedHeap.inline.hpp"
 #include "gc/shared/fullGCForwarding.inline.hpp"
 #include "gc/shared/gcCause.hpp"
 #include "gc/shared/gcHeapSummary.hpp"
@@ -56,12 +59,12 @@
 #include "gc/shared/oopStorage.inline.hpp"
 #include "gc/shared/oopStorageSet.inline.hpp"
 #include "gc/shared/oopStorageSetParState.inline.hpp"
+#include "gc/shared/parallelCleaning.hpp"
 #include "gc/shared/preservedMarks.inline.hpp"
 #include "gc/shared/referencePolicy.hpp"
 #include "gc/shared/referenceProcessor.hpp"
 #include "gc/shared/referenceProcessorPhaseTimes.hpp"
 #include "gc/shared/spaceDecorator.hpp"
-#include "gc/shared/strongRootsScope.hpp"
 #include "gc/shared/taskTerminator.hpp"
 #include "gc/shared/weakProcessor.inline.hpp"
 #include "gc/shared/workerPolicy.hpp"
@@ -81,7 +84,6 @@
 #include "oops/methodData.hpp"
 #include "oops/objArrayKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
-#include "runtime/atomicAccess.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/safepoint.hpp"
@@ -133,8 +135,8 @@ bool ParallelCompactData::RegionData::is_clear() {
          (_source_region == 0) &&
          (_partial_obj_addr == nullptr) &&
          (_partial_obj_size == 0) &&
-         (_dc_and_los == 0) &&
-         (_shadow_state == 0);
+         (dc_and_los() == 0) &&
+         (shadow_state() == 0);
 }
 
 #ifdef ASSERT
@@ -143,8 +145,8 @@ void ParallelCompactData::RegionData::verify_clear() {
   assert(_source_region == 0, "inv");
   assert(_partial_obj_addr == nullptr, "inv");
   assert(_partial_obj_size == 0, "inv");
-  assert(_dc_and_los == 0, "inv");
-  assert(_shadow_state == 0, "inv");
+  assert(dc_and_los() == 0, "inv");
+  assert(shadow_state() == 0, "inv");
 }
 #endif
 
@@ -294,7 +296,9 @@ void ParallelCompactData::clear_range(size_t beg_region, size_t end_region) {
   assert(end_region <= _region_count, "end_region out of range");
 
   const size_t region_cnt = end_region - beg_region;
-  memset(_region_data + beg_region, 0, region_cnt * sizeof(RegionData));
+  for (size_t i = beg_region; i < end_region; i++) {
+    ::new (&_region_data[i]) RegionData{};
+  }
 }
 
 // The total live words on src_region would overflow the target space, so find
@@ -931,6 +935,17 @@ void PSParallelCompact::summary_phase(bool should_do_max_compaction)
   }
 }
 
+void PSParallelCompact::report_object_count_after_gc() {
+  GCTraceTime(Debug, gc, phases) tm("Report Object Count", &_gc_timer);
+  // The heap is compacted, all objects are iterable. However there may be
+  // filler objects in the heap which we should ignore.
+  class SkipFillerObjectClosure : public BoolObjectClosure {
+  public:
+    bool do_object_b(oop obj) override { return !CollectedHeap::is_filler_object(obj); }
+  } cl;
+  _gc_tracer.report_object_count_after_gc(&cl, &ParallelScavengeHeap::heap()->workers());
+}
+
 bool PSParallelCompact::invoke(bool clear_all_soft_refs, bool should_do_max_compaction) {
   assert(SafepointSynchronize::is_at_safepoint(), "should be at safepoint");
   assert(Thread::current() == (Thread*)VMThread::vm_thread(),
@@ -1026,6 +1041,8 @@ bool PSParallelCompact::invoke(bool clear_all_soft_refs, bool should_do_max_comp
 
     heap->print_heap_change(pre_gc_values);
 
+    report_object_count_after_gc();
+
     // Track memory usage and detect low memory
     MemoryService::track_memory_usage();
     heap->update_counters();
@@ -1053,24 +1070,19 @@ bool PSParallelCompact::invoke(bool clear_all_soft_refs, bool should_do_max_comp
 }
 
 class PCAddThreadRootsMarkingTaskClosure : public ThreadClosure {
-private:
-  uint _worker_id;
+  ParCompactionManager* _cm;
 
 public:
-  PCAddThreadRootsMarkingTaskClosure(uint worker_id) : _worker_id(worker_id) { }
+  PCAddThreadRootsMarkingTaskClosure(ParCompactionManager* cm) : _cm(cm) { }
   void do_thread(Thread* thread) {
-    assert(ParallelScavengeHeap::heap()->is_stw_gc_active(), "called outside gc");
-
     ResourceMark rm;
 
-    ParCompactionManager* cm = ParCompactionManager::gc_thread_compaction_manager(_worker_id);
+    MarkingNMethodClosure mark_and_push_in_blobs(&_cm->_mark_and_push_closure);
 
-    MarkingNMethodClosure mark_and_push_in_blobs(&cm->_mark_and_push_closure);
-
-    thread->oops_do(&cm->_mark_and_push_closure, &mark_and_push_in_blobs);
+    thread->oops_do(&_cm->_mark_and_push_closure, &mark_and_push_in_blobs);
 
     // Do the real work
-    cm->follow_marking_stacks();
+    _cm->follow_marking_stacks();
   }
 };
 
@@ -1090,7 +1102,8 @@ void steal_marking_work(TaskTerminator& terminator, uint worker_id) {
 }
 
 class MarkFromRootsTask : public WorkerTask {
-  StrongRootsScope _strong_roots_scope; // needed for Threads::possibly_parallel_threads_do
+  NMethodMarkingScope _nmethod_marking_scope;
+  ThreadsClaimTokenScope _threads_claim_token_scope;
   OopStorageSetStrongParState<false /* concurrent */, false /* is_const */> _oop_storage_set_par_state;
   TaskTerminator _terminator;
   uint _active_workers;
@@ -1098,7 +1111,8 @@ class MarkFromRootsTask : public WorkerTask {
 public:
   MarkFromRootsTask(uint active_workers) :
       WorkerTask("MarkFromRootsTask"),
-      _strong_roots_scope(active_workers),
+      _nmethod_marking_scope(),
+      _threads_claim_token_scope(),
       _terminator(active_workers, ParCompactionManager::marking_stacks()),
       _active_workers(active_workers) {}
 
@@ -1114,7 +1128,7 @@ public:
     }
 
     {
-      PCAddThreadRootsMarkingTaskClosure closure(worker_id);
+      PCAddThreadRootsMarkingTaskClosure closure(cm);
       Threads::possibly_parallel_threads_do(_active_workers > 1 /* is_par */, &closure);
     }
 
@@ -1158,6 +1172,40 @@ static void flush_marking_stats_cache(const uint num_workers) {
     cm->flush_and_destroy_marking_stats_cache();
   }
 }
+
+class PSParallelCleaningTask : public WorkerTask {
+  bool                    _unloading_occurred;
+  CodeCacheUnloadingTask  _code_cache_task;
+  // Prune dead klasses from subklass/sibling/implementor lists.
+  KlassCleaningTask       _klass_cleaning_task;
+
+public:
+  PSParallelCleaningTask(bool unloading_occurred) :
+    WorkerTask("PS Parallel Cleaning"),
+    _unloading_occurred(unloading_occurred),
+    _code_cache_task(unloading_occurred),
+    _klass_cleaning_task() {}
+
+  void work(uint worker_id) {
+#if INCLUDE_JVMCI
+    if (EnableJVMCI && worker_id == 0) {
+      // Serial work; only first worker.
+      // Clean JVMCI metadata handles.
+      JVMCI::do_unloading(_unloading_occurred);
+    }
+#endif
+
+    // Do first pass of code cache cleaning.
+    _code_cache_task.work(worker_id);
+
+    // Clean all klasses that were not unloaded.
+    // The weak metadata in klass doesn't need to be
+    // processed if there was no unloading.
+    if (_unloading_occurred) {
+      _klass_cleaning_task.work();
+    }
+  }
+};
 
 void PSParallelCompact::marking_phase(ParallelOldTracer *gc_tracer) {
   // Recursively traverse all live objects and mark them
@@ -1207,19 +1255,18 @@ void PSParallelCompact::marking_phase(ParallelOldTracer *gc_tracer) {
   {
     GCTraceTime(Debug, gc, phases) tm_m("Class Unloading", &_gc_timer);
 
-    ClassUnloadingContext ctx(1 /* num_nmethod_unlink_workers */,
+    ClassUnloadingContext ctx(active_gc_threads /* num_nmethod_unlink_workers */,
                               false /* unregister_nmethods_during_purge */,
                               false /* lock_nmethod_free_separately */);
 
-    bool unloading_occurred;
     {
       CodeCache::UnlinkingScope scope(is_alive_closure());
 
       // Follow system dictionary roots and unload classes.
-      unloading_occurred = SystemDictionary::do_unloading(&_gc_timer);
+      bool unloading_occurred = SystemDictionary::do_unloading(&_gc_timer);
 
-      // Unload nmethods.
-      CodeCache::do_unloading(unloading_occurred);
+      PSParallelCleaningTask task{unloading_occurred};
+      ParallelScavengeHeap::heap()->workers().run_task(&task);
     }
 
     {
@@ -1235,12 +1282,6 @@ void PSParallelCompact::marking_phase(ParallelOldTracer *gc_tracer) {
       GCTraceTime(Debug, gc, phases) t("Free Code Blobs", gc_timer());
       ctx.free_nmethods();
     }
-
-    // Prune dead klasses from subklass/sibling/implementor lists.
-    Klass::clean_weak_klass_links(unloading_occurred);
-
-    // Clean JVMCI metadata handles.
-    JVMCI_ONLY(JVMCI::do_unloading(unloading_occurred));
     {
       // Delete metaspaces for unloaded class loaders and clean up loader_data graph
       GCTraceTime(Debug, gc, phases) t("Purge Class Loader Data", gc_timer());
@@ -1249,17 +1290,13 @@ void PSParallelCompact::marking_phase(ParallelOldTracer *gc_tracer) {
     }
   }
 
-  {
-    GCTraceTime(Debug, gc, phases) tm("Report Object Count", &_gc_timer);
-    _gc_tracer.report_object_count_after_gc(is_alive_closure(), &ParallelScavengeHeap::heap()->workers());
-  }
 #if TASKQUEUE_STATS
   ParCompactionManager::print_and_reset_taskqueue_stats();
 #endif
 }
 
 template<typename Func>
-void PSParallelCompact::adjust_in_space_helper(SpaceId id, volatile uint* claim_counter, Func&& on_stripe) {
+void PSParallelCompact::adjust_in_space_helper(SpaceId id, Atomic<uint>* claim_counter, Func&& on_stripe) {
   MutableSpace* sp = PSParallelCompact::space(id);
   HeapWord* const bottom = sp->bottom();
   HeapWord* const top = sp->top();
@@ -1272,7 +1309,7 @@ void PSParallelCompact::adjust_in_space_helper(SpaceId id, volatile uint* claim_
   const size_t stripe_size = num_regions_per_stripe * region_size;
 
   while (true) {
-    uint counter = AtomicAccess::fetch_then_add(claim_counter, num_regions_per_stripe);
+    uint counter = claim_counter->fetch_then_add(num_regions_per_stripe);
     HeapWord* cur_stripe = bottom + counter * region_size;
     if (cur_stripe >= top) {
       break;
@@ -1282,7 +1319,7 @@ void PSParallelCompact::adjust_in_space_helper(SpaceId id, volatile uint* claim_
   }
 }
 
-void PSParallelCompact::adjust_in_old_space(volatile uint* claim_counter) {
+void PSParallelCompact::adjust_in_old_space(Atomic<uint>* claim_counter) {
   // Regions in old-space shouldn't be split.
   assert(!_space_info[old_space_id].split_info().is_valid(), "inv");
 
@@ -1313,7 +1350,7 @@ void PSParallelCompact::adjust_in_old_space(volatile uint* claim_counter) {
   });
 }
 
-void PSParallelCompact::adjust_in_young_space(SpaceId id, volatile uint* claim_counter) {
+void PSParallelCompact::adjust_in_young_space(SpaceId id, Atomic<uint>* claim_counter) {
   adjust_in_space_helper(id, claim_counter, [](HeapWord* stripe_start, HeapWord* stripe_end) {
     HeapWord* obj_start = stripe_start;
     while (obj_start < stripe_end) {
@@ -1327,7 +1364,7 @@ void PSParallelCompact::adjust_in_young_space(SpaceId id, volatile uint* claim_c
   });
 }
 
-void PSParallelCompact::adjust_pointers_in_spaces(uint worker_id, volatile uint* claim_counters) {
+void PSParallelCompact::adjust_pointers_in_spaces(uint worker_id, Atomic<uint>* claim_counters) {
   auto start_time = Ticks::now();
   adjust_in_old_space(&claim_counters[0]);
   for (uint id = eden_space_id; id < last_space_id; ++id) {
@@ -1337,58 +1374,65 @@ void PSParallelCompact::adjust_pointers_in_spaces(uint worker_id, volatile uint*
 }
 
 class PSAdjustTask final : public WorkerTask {
-  SubTasksDone                               _sub_tasks;
+  ThreadsClaimTokenScope                     _threads_claim_token_scope;
   WeakProcessor::Task                        _weak_proc_task;
   OopStorageSetStrongParState<false, false>  _oop_storage_iter;
   uint                                       _nworkers;
-  volatile uint _claim_counters[PSParallelCompact::last_space_id] = {};
+  Atomic<bool>                               _code_cache_claimed;
+  Atomic<uint> _claim_counters[PSParallelCompact::last_space_id];
 
-  enum PSAdjustSubTask {
-    PSAdjustSubTask_code_cache,
-
-    PSAdjustSubTask_num_elements
-  };
+  bool try_claim_code_cache_task() {
+    return _code_cache_claimed.load_relaxed() == false
+        && _code_cache_claimed.compare_set(false, true);
+  }
 
 public:
   PSAdjustTask(uint nworkers) :
     WorkerTask("PSAdjust task"),
-    _sub_tasks(PSAdjustSubTask_num_elements),
+    _threads_claim_token_scope(),
     _weak_proc_task(nworkers),
-    _nworkers(nworkers) {
+    _oop_storage_iter(),
+    _nworkers(nworkers),
+    _code_cache_claimed(false) {
 
+    for (unsigned int i = PSParallelCompact::old_space_id; i < PSParallelCompact::last_space_id; ++i) {
+      ::new (&_claim_counters[i]) Atomic<uint>{};
+    }
     ClassLoaderDataGraph::verify_claimed_marks_cleared(ClassLoaderData::_claim_stw_fullgc_adjust);
-    Threads::change_thread_claim_token();
-  }
-
-  ~PSAdjustTask() {
-    Threads::assert_all_threads_claimed();
   }
 
   void work(uint worker_id) {
-    ParCompactionManager* cm = ParCompactionManager::gc_thread_compaction_manager(worker_id);
-    cm->preserved_marks()->adjust_during_full_gc();
     {
-      // adjust pointers in all spaces
+      // Pointers in heap.
+      ParCompactionManager* cm = ParCompactionManager::gc_thread_compaction_manager(worker_id);
+      cm->preserved_marks()->adjust_during_full_gc();
+
       PSParallelCompact::adjust_pointers_in_spaces(worker_id, _claim_counters);
     }
+
     {
-      ResourceMark rm;
-      Threads::possibly_parallel_oops_do(_nworkers > 1, &pc_adjust_pointer_closure, nullptr);
-    }
-    _oop_storage_iter.oops_do(&pc_adjust_pointer_closure);
-    {
+      // All (strong and weak) CLDs.
       CLDToOopClosure cld_closure(&pc_adjust_pointer_closure, ClassLoaderData::_claim_stw_fullgc_adjust);
       ClassLoaderDataGraph::cld_do(&cld_closure);
     }
+
     {
+      // Threads stack frames. No need to visit on-stack nmethods, because all
+      // nmethods are visited in one go via CodeCache::nmethods_do.
+      ResourceMark rm;
+      Threads::possibly_parallel_oops_do(_nworkers > 1, &pc_adjust_pointer_closure, nullptr);
+      if (try_claim_code_cache_task()) {
+        NMethodToOopClosure adjust_code(&pc_adjust_pointer_closure, NMethodToOopClosure::FixRelocations);
+        CodeCache::nmethods_do(&adjust_code);
+      }
+    }
+
+    {
+      // VM internal strong and weak roots.
+      _oop_storage_iter.oops_do(&pc_adjust_pointer_closure);
       AlwaysTrueClosure always_alive;
       _weak_proc_task.work(worker_id, &always_alive, &pc_adjust_pointer_closure);
     }
-    if (_sub_tasks.try_claim_task(PSAdjustSubTask_code_cache)) {
-      NMethodToOopClosure adjust_code(&pc_adjust_pointer_closure, NMethodToOopClosure::FixRelocations);
-      CodeCache::nmethods_do(&adjust_code);
-    }
-    _sub_tasks.all_tasks_claimed();
   }
 };
 
@@ -1806,8 +1850,7 @@ void PSParallelCompact::verify_filler_in_dense_prefix() {
       oop obj = cast_to_oop(cur_addr);
       oopDesc::verify(obj);
       if (!mark_bitmap()->is_marked(cur_addr)) {
-        Klass* k = cast_to_oop(cur_addr)->klass();
-        assert(k == Universe::fillerArrayKlass() || k == vmClasses::FillerObject_klass(), "inv");
+        assert(CollectedHeap::is_filler_object(cast_to_oop(cur_addr)), "inv");
       }
       cur_addr += obj->size();
     }

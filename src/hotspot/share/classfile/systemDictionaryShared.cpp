@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,7 @@
 
 #include "cds/aotClassFilter.hpp"
 #include "cds/aotClassLocation.hpp"
+#include "cds/aotCompressedPointers.hpp"
 #include "cds/aotLogging.hpp"
 #include "cds/aotMetaspace.hpp"
 #include "cds/archiveBuilder.hpp"
@@ -174,7 +175,6 @@ InstanceKlass* SystemDictionaryShared::acquire_class_for_current_thread(
 
   // No longer holding SharedDictionary_lock
   // No need to lock, as <ik> can be held only by a single thread.
-  loader_data->add_class(ik);
 
   // Get the package entry.
   PackageEntry* pkg_entry = CDSProtectionDomain::get_package_entry_from_class(ik, class_loader);
@@ -856,6 +856,28 @@ public:
   }
 };
 
+void SystemDictionaryShared::link_all_exclusion_check_candidates(InstanceKlass* ik) {
+  bool need_to_link = false;
+  {
+    MutexLocker ml(DumpTimeTable_lock, Mutex::_no_safepoint_check_flag);
+    ExclusionCheckCandidates candidates(ik);
+
+    candidates.iterate_all([&] (InstanceKlass* k, DumpTimeClassInfo* info) {
+      if (!k->is_linked()) {
+        need_to_link = true;
+      }
+    });
+  }
+  if (need_to_link) {
+    JavaThread* THREAD = JavaThread::current();
+    if (log_is_enabled(Info, aot, link)) {
+      ResourceMark rm(THREAD);
+      log_info(aot, link)("Link all loaded classes for %s", ik->external_name());
+    }
+    AOTMetaspace::link_all_loaded_classes(THREAD);
+  }
+}
+
 // Returns true if the class should be excluded. This can be called by
 // AOTConstantPoolResolver before or after we enter the CDS safepoint.
 // When called before the safepoint, we need to link the class so that
@@ -879,27 +901,19 @@ bool SystemDictionaryShared::should_be_excluded(Klass* k) {
     InstanceKlass* ik = InstanceKlass::cast(k);
 
     if (!SafepointSynchronize::is_at_safepoint()) {
-      if (!ik->is_linked()) {
-        // should_be_excluded_impl() below doesn't link unlinked classes. We come
-        // here only when we are trying to aot-link constant pool entries, so
-        // we'd better link the class.
-        JavaThread* THREAD = JavaThread::current();
-        ik->link_class(THREAD);
-        if (HAS_PENDING_EXCEPTION) {
-          CLEAR_PENDING_EXCEPTION;
-          return true; // linking failed -- let's exclude it
+      {
+        // fast path
+        MutexLocker ml(DumpTimeTable_lock, Mutex::_no_safepoint_check_flag);
+        DumpTimeClassInfo* p = get_info_locked(ik);
+        if (p->has_checked_exclusion()) {
+          return p->is_excluded();
         }
-
-        // Also link any classes that were loaded for the verification of ik or its supertypes.
-        // Otherwise we might miss the verification constraints of those classes.
-        AOTMetaspace::link_all_loaded_classes(THREAD);
       }
+
+      link_all_exclusion_check_candidates(ik);
 
       MutexLocker ml(DumpTimeTable_lock, Mutex::_no_safepoint_check_flag);
       DumpTimeClassInfo* p = get_info_locked(ik);
-      if (p->is_excluded()) {
-        return true;
-      }
       return should_be_excluded_impl(ik, p);
     } else {
       // When called within the CDS safepoint, the correctness of this function
@@ -913,7 +927,7 @@ bool SystemDictionaryShared::should_be_excluded(Klass* k) {
 
       // No need to check for is_linked() as all eligible classes should have
       // already been linked in AOTMetaspace::link_class_for_cds().
-      // Can't take the lock as we are in safepoint.
+      // Don't take DumpTimeTable_lock as we are in safepoint.
       DumpTimeClassInfo* p = _dumptime_table->get(ik);
       if (p->is_excluded()) {
         return true;
@@ -1269,11 +1283,10 @@ unsigned int SystemDictionaryShared::hash_for_shared_dictionary(address ptr) {
 class CopySharedClassInfoToArchive : StackObj {
   CompactHashtableWriter* _writer;
   bool _is_builtin;
-  ArchiveBuilder *_builder;
 public:
   CopySharedClassInfoToArchive(CompactHashtableWriter* writer,
                                bool is_builtin)
-    : _writer(writer), _is_builtin(is_builtin), _builder(ArchiveBuilder::current()) {}
+    : _writer(writer), _is_builtin(is_builtin) {}
 
   void do_entry(InstanceKlass* k, DumpTimeClassInfo& info) {
     if (!info.is_excluded() && info.is_builtin() == _is_builtin) {
@@ -1286,11 +1299,10 @@ public:
       Symbol* name = info._klass->name();
       name = ArchiveBuilder::current()->get_buffered_addr(name);
       hash = SystemDictionaryShared::hash_for_shared_dictionary((address)name);
-      u4 delta = _builder->buffer_to_offset_u4((address)record);
       if (_is_builtin && info._klass->is_hidden()) {
         // skip
       } else {
-        _writer->add(hash, delta);
+        _writer->add(hash, AOTCompressedPointers::encode_not_null(record));
       }
       if (log_is_enabled(Trace, aot, hashtables)) {
         ResourceMark rm;
@@ -1418,7 +1430,11 @@ const char* SystemDictionaryShared::loader_type_for_shared_class(Klass* k) {
 }
 
 void SystemDictionaryShared::get_all_archived_classes(bool is_static_archive, GrowableArray<Klass*>* classes) {
-  get_archive(is_static_archive)->_builtin_dictionary.iterate([&] (const RunTimeClassInfo* record) {
+  get_archive(is_static_archive)->_builtin_dictionary.iterate_all([&] (const RunTimeClassInfo* record) {
+      classes->append(record->klass());
+    });
+
+  get_archive(is_static_archive)->_unregistered_dictionary.iterate_all([&] (const RunTimeClassInfo* record) {
       classes->append(record->klass());
     });
 }
@@ -1447,9 +1463,9 @@ void SystemDictionaryShared::ArchiveInfo::print_on(const char* prefix,
   st->print_cr("%sShared Dictionary", prefix);
   SharedDictionaryPrinter p(st);
   st->print_cr("%sShared Builtin Dictionary", prefix);
-  _builtin_dictionary.iterate(&p);
+  _builtin_dictionary.iterate_all(&p);
   st->print_cr("%sShared Unregistered Dictionary", prefix);
-  _unregistered_dictionary.iterate(&p);
+  _unregistered_dictionary.iterate_all(&p);
   LambdaProxyClassDictionary::print_on(prefix, st, p.index(), is_static_archive);
 }
 
