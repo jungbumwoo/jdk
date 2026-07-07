@@ -114,6 +114,19 @@ import java.util.function.LongConsumer;
  * @param <T> type of elements for value streams
  * @since 1.8
  */
+// [Stream 파이프라인의 데이터 흐름 매개체 — 푸시(push) 모델의 핵심]
+//
+// Iterator/Spliterator가 "pull" 모델(소비자가 원소를 당겨옴)이라면,
+// Sink는 "push" 모델 — 소스가 원소를 싱크 체인으로 밀어 넣는다.
+//
+// 생명주기:
+//   1. begin(size)  — 데이터 스트림 시작 알림. size=-1이면 크기 미지.
+//   2. accept(t)    — 원소 하나 처리 (Consumer<T>에서 상속).
+//   3. end()        — 마지막 원소 처리 후 호출. stateful 싱크(sorted 등)는 여기서 결과를 flush.
+//
+// 단락(short-circuit) 지원:
+//   cancellationRequested()가 true를 반환하면 푸시를 즉시 중단.
+//   findFirst, limit, anyMatch 등에서 활용.
 interface Sink<T> extends Consumer<T> {
     /**
      * Resets the sink state to receive a fresh data set.  This must be called
@@ -125,6 +138,8 @@ interface Sink<T> extends Consumer<T> {
      * <p>Prior to this call, the sink must be in the initial state, and after
      * this call it is in the active state.
      */
+    // 데이터 수신 시작을 알린다. size가 알려져 있으면 내부 버퍼 사전 할당 등에 활용 가능.
+    // filter처럼 원소가 얼마나 통과할지 모를 때 downstream.begin(-1)을 호출한다.
     default void begin(long size) {}
 
     /**
@@ -135,6 +150,9 @@ interface Sink<T> extends Consumer<T> {
      * <p>Prior to this call, the sink must be in the active state, and after
      * this call it is returned to the initial state.
      */
+    // 모든 원소 처리 완료를 알린다.
+    // sorted()처럼 모든 원소를 모아두었다가 한꺼번에 내려보내는 stateful 싱크는
+    // 이 메서드에서 버퍼에 쌓인 원소들을 정렬 후 downstream으로 flush한다.
     default void end() {}
 
     /**
@@ -144,6 +162,9 @@ interface Sink<T> extends Consumer<T> {
      *
      * @return true if cancellation is requested
      */
+    // 단락(short-circuit) 신호 — true를 반환하면 소스에서 원소 전달을 중단해야 한다.
+    // findFirst가 값을 찾거나 limit이 한도에 도달하면 true를 반환한다.
+    // copyIntoWithCancel()이 각 원소 처리 후 이 메서드를 폴링한다.
     default boolean cancellationRequested() {
         return false;
     }
@@ -244,13 +265,22 @@ interface Sink<T> extends Consumer<T> {
      * implementation of the {@code accept()} method must call the correct
      * {@code accept()} method on the downstream {@code Sink}.
      */
+    // [중간 연산 싱크의 기반 클래스 — 싱크 체인의 연결 고리]
+    //
+    // 각 중간 연산(filter, map, peek 등)은 이 클래스를 익명 서브클래스로 구현하며,
+    // downstream 필드에 다음 스테이지 싱크를 참조하여 원소를 전달한다.
+    //
+    // begin/end/cancellationRequested는 downstream에 그대로 위임(delegation)한다.
+    // 서브클래스는 accept()만 오버라이드하여 자신의 변환/필터 로직 후 downstream.accept() 호출.
     abstract static class ChainedReference<T, E_OUT> implements Sink<T> {
+        // 다음 스테이지의 싱크 — 이 싱크가 처리를 마친 원소를 여기로 전달한다.
         protected final Sink<? super E_OUT> downstream;
 
         public ChainedReference(Sink<? super E_OUT> downstream) {
             this.downstream = Objects.requireNonNull(downstream);
         }
 
+        // 생명주기 메서드들은 모두 downstream으로 전달 — 체인 전체에 begin/end가 전파된다.
         @Override
         public void begin(long size) {
             downstream.begin(size);
@@ -261,6 +291,7 @@ interface Sink<T> extends Consumer<T> {
             downstream.end();
         }
 
+        // 단락 신호도 downstream에서 upstream으로 역방향 전파된다.
         @Override
         public boolean cancellationRequested() {
             return downstream.cancellationRequested();

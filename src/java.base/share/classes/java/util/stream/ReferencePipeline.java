@@ -59,6 +59,16 @@ import jdk.internal.access.SharedSecrets;
  *
  * @since 1.8
  */
+// [참조 타입 스트림의 구체적 파이프라인 구현]
+//
+// AbstractPipeline의 참조(객체) 타입 전문화 버전으로, Stream<T> 인터페이스를 구현한다.
+// filter, map, flatMap 등 모든 참조 타입 중간 연산과
+// forEach, collect, reduce 등 터미널 연산이 여기 정의된다.
+//
+// 서브클래스 구조:
+//   Head          — stream()을 통해 생성되는 최초 소스 스테이지
+//   StatelessOp   — filter, map, flatMap, peek 등 원소 독립적 중간 연산
+//   StatefulOp    — sorted, distinct, limit, skip 등 전체 원소를 봐야 하는 중간 연산
 abstract class ReferencePipeline<P_IN, P_OUT>
         extends AbstractPipeline<P_IN, P_OUT, Stream<P_OUT>>
         implements Stream<P_OUT>  {
@@ -141,6 +151,9 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         return new StreamSpliterators.DelegatingSpliterator<>(supplier);
     }
 
+    // [단락 루프 — 취소 신호가 올 때까지 원소를 하나씩 push]
+    // do-while로 tryAdvance를 반복하되, sink.cancellationRequested()가 true면 즉시 중단.
+    // copyInto()의 단락 경로에서 copyIntoWithCancel()을 통해 호출된다.
     @Override
     final boolean forEachWithCancel(Spliterator<P_OUT> spliterator, Sink<P_OUT> sink) {
         boolean cancelled;
@@ -178,6 +191,12 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         };
     }
 
+    // [filter — 가장 기본적인 stateless 중간 연산]
+    //
+    // StatelessOp 익명 서브클래스를 생성하고, opWrapSink()에서 ChainedReference를 반환한다.
+    // NOT_SIZED 플래그: filter는 크기를 줄일 수 있으므로 SIZED 특성을 제거한다.
+    // begin(-1): 필터 통과 후 정확한 원소 수를 알 수 없으므로 downstream에 -1을 전달.
+    // accept(): predicate를 통과한 원소만 downstream으로 전달한다.
     @Override
     public final Stream<P_OUT> filter(Predicate<? super P_OUT> predicate) {
         Objects.requireNonNull(predicate);
@@ -188,12 +207,12 @@ abstract class ReferencePipeline<P_IN, P_OUT>
                 return new Sink.ChainedReference<>(sink) {
                     @Override
                     public void begin(long size) {
-                        downstream.begin(-1);
+                        downstream.begin(-1);  // 필터 후 크기 미지
                     }
 
                     @Override
                     public void accept(P_OUT u) {
-                        if (predicate.test(u))
+                        if (predicate.test(u))   // predicate 통과 시에만 downstream으로 전달
                             downstream.accept(u);
                     }
                 };
@@ -201,6 +220,10 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         };
     }
 
+    // [map — 원소를 변환하는 stateless 중간 연산]
+    //
+    // NOT_SORTED | NOT_DISTINCT: 변환 후 정렬/중복 제거 특성을 보장할 수 없으므로 제거.
+    // accept(): 원소에 mapper를 적용한 결과를 downstream으로 전달. 크기는 그대로 유지(begin 오버라이드 없음).
     @Override
     public final <R> Stream<R> map(Function<? super P_OUT, ? extends R> mapper) {
         Objects.requireNonNull(mapper);
@@ -211,7 +234,7 @@ abstract class ReferencePipeline<P_IN, P_OUT>
                 return new Sink.ChainedReference<>(sink) {
                     @Override
                     public void accept(P_OUT u) {
-                        downstream.accept(mapper.apply(u));
+                        downstream.accept(mapper.apply(u));  // 변환 후 전달
                     }
                 };
             }
@@ -269,6 +292,18 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         };
     }
 
+    // [flatMap — 원소 하나를 스트림으로 확장한 후 평탄화하는 stateless 중간 연산]
+    //
+    // 단락 파이프라인 여부에 따라 두 가지 경로로 분기된다:
+    //
+    // A. 단락 없는 일반 경로 (shorts=false):
+    //    result.sequential().forEach(sink) — 내부 스트림의 원소를 직접 sink로 밀어 넣음.
+    //
+    // B. 단락 있는 경로 (shorts=true, e.g. .flatMap(...).findFirst()):
+    //    result.sequential().allMatch(this) — Predicate<R>로 FlatMap 자신을 사용.
+    //    각 원소마다 sink.cancellationRequested()를 확인하여 일찍 중단 가능.
+    //
+    // cancel 플래그: 내부 스트림을 처리 중에도 외부 단락 신호를 전파하기 위해 사용.
     @Override
     public final <R> Stream<R> flatMap(Function<? super P_OUT, ? extends Stream<? extends R>> mapper) {
         Objects.requireNonNull(mapper);
@@ -276,11 +311,11 @@ abstract class ReferencePipeline<P_IN, P_OUT>
                 StreamOpFlag.NOT_SORTED | StreamOpFlag.NOT_DISTINCT | StreamOpFlag.NOT_SIZED) {
             @Override
             Sink<P_OUT> opWrapSink(int flags, Sink<R> sink) {
-                boolean shorts = isShortCircuitingPipeline();
+                boolean shorts = isShortCircuitingPipeline();  // 단락 파이프라인 여부 사전 확인
                 final class FlatMap implements Sink<P_OUT>, Predicate<R> {
                     boolean cancel;
 
-                    @Override public void begin(long size) { sink.begin(-1); }
+                    @Override public void begin(long size) { sink.begin(-1); }  // 평탄화 후 크기 미지
                     @Override public void end() { sink.end(); }
 
                     @Override
@@ -288,8 +323,10 @@ abstract class ReferencePipeline<P_IN, P_OUT>
                         try (Stream<? extends R> result = mapper.apply(e)) {
                             if (result != null) {
                                 if (shorts)
+                                    // 단락 경로: Predicate로 자신을 넘겨 원소마다 취소 확인
                                     result.sequential().allMatch(this);
                                 else
+                                    // 일반 경로: 내부 스트림 원소를 모두 sink로 전달
                                     result.sequential().forEach(sink);
                             }
                         }
@@ -297,6 +334,7 @@ abstract class ReferencePipeline<P_IN, P_OUT>
 
                     @Override
                     public boolean cancellationRequested() {
+                        // 외부 sink의 취소 요청을 cancel 필드로 캐시하여 중복 폴링 방지
                         return cancel || (cancel |= sink.cancellationRequested());
                     }
 
@@ -304,6 +342,7 @@ abstract class ReferencePipeline<P_IN, P_OUT>
                     public boolean test(R output) {
                         if (!cancel) {
                             sink.accept(output);
+                            // 내부 원소를 보낸 후 취소 여부 확인 — false 반환 시 allMatch 중단
                             return !(cancel |= sink.cancellationRequested());
                         } else {
                             return false;
@@ -627,6 +666,9 @@ abstract class ReferencePipeline<P_IN, P_OUT>
 
     // Terminal operations from Stream
 
+    // [forEach — 가장 단순한 터미널 연산]
+    // ForEachOps.makeRef(action, false) — ordered=false이므로 병렬 시 순서 보장 없음.
+    // evaluate()를 통해 파이프라인 평가를 시작한다.
     @Override
     public void forEach(Consumer<? super P_OUT> action) {
         evaluate(ForEachOps.makeRef(action, false));
@@ -688,6 +730,9 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         return evaluate(FindOps.makeRef(false));
     }
 
+    // [reduce — 불변 축약(immutable reduction) 터미널 연산]
+    // identity(초기값) + accumulator(이항 연산) 조합.
+    // 세 번째 인수로 accumulator를 combiner로도 재사용 — 병렬 시 서브태스크 결과 병합에 활용.
     @Override
     public final P_OUT reduce(final P_OUT identity, final BinaryOperator<P_OUT> accumulator) {
         return evaluate(ReduceOps.makeRef(identity, accumulator, accumulator));
@@ -708,6 +753,20 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         return GathererOp.of(this, gatherer);
     }
 
+    // [collect — 가변 축약(mutable reduction) 터미널 연산]
+    //
+    // 두 가지 경로:
+    //
+    // A. 병렬 + CONCURRENT + (UNORDERED 또는 비순서 파이프라인):
+    //    컨테이너를 하나만 생성하고, 모든 스레드가 직접 공유하며 동시에 누적.
+    //    병합(combiner) 단계가 없어 오버헤드가 적다.
+    //    (예: ConcurrentHashMap을 사용하는 toConcurrentMap)
+    //
+    // B. 그 외 (순차 또는 일반 병렬):
+    //    ReduceOps.makeRef(collector) — 각 ForkJoin 서브태스크가 독립 컨테이너를 가지고,
+    //    onCompletion()에서 combiner()로 병합.
+    //
+    // finisher: IDENTITY_FINISH이면 컨테이너를 그대로 반환, 아니면 finisher 변환 적용.
     @Override
     @SuppressWarnings("unchecked")
     public <R, A> R collect(Collector<? super P_OUT, A, R> collector) {
@@ -715,13 +774,16 @@ abstract class ReferencePipeline<P_IN, P_OUT>
         if (isParallel()
                 && (collector.characteristics().contains(Collector.Characteristics.CONCURRENT))
                 && (!isOrdered() || collector.characteristics().contains(Collector.Characteristics.UNORDERED))) {
+            // 경로 A: 공유 컨테이너에 직접 병렬 누적
             container = collector.supplier().get();
             BiConsumer<A, ? super P_OUT> accumulator = collector.accumulator();
             forEach(u -> accumulator.accept(container, u));
         }
         else {
+            // 경로 B: 각 서브태스크 독립 컨테이너 → 병합
             container = evaluate(ReduceOps.makeRef(collector));
         }
+        // IDENTITY_FINISH: finisher가 항등 변환이면 캐스팅만 수행(오버헤드 없음)
         return collector.characteristics().contains(Collector.Characteristics.IDENTITY_FINISH)
                ? (R) container
                : collector.finisher().apply(container);
@@ -759,6 +821,9 @@ abstract class ReferencePipeline<P_IN, P_OUT>
      * @param <E_OUT> type of elements in produced by this stage
      * @since 1.8
      */
+    // [소스 스테이지 — Collection.stream()이 반환하는 최초 파이프라인 노드]
+    // Head는 opIsStateful()과 opWrapSink()를 지원하지 않는다 (UnsupportedOperationException).
+    // 소스에 연산이 없을 때 forEach/forEachOrdered를 spliterator.forEachRemaining()으로 최적화한다.
     static class Head<E_IN, E_OUT> extends ReferencePipeline<E_IN, E_OUT> {
         /**
          * Constructor for the source stage of a Stream.
@@ -825,6 +890,14 @@ abstract class ReferencePipeline<P_IN, P_OUT>
      * @param <E_OUT> type of elements in produced by this stage
      * @since 1.8
      */
+    // [비상태(Stateless) 중간 연산의 기반 클래스]
+    //
+    // 각 원소를 독립적으로 처리하므로, 원소를 내부에 저장할 필요가 없다.
+    // filter, map, flatMap, peek, mapToInt 등이 이 클래스를 익명 서브클래스로 확장한다.
+    //
+    // opIsStateful() = false이므로:
+    //   - 순차/병렬 모두 파이프라인 전체를 한 번에 평가(단일 패스).
+    //   - 병렬 시 Spliterator를 분할한 각 파티션이 독립적으로 싱크 체인을 실행한다.
     abstract static class StatelessOp<E_IN, E_OUT>
             extends ReferencePipeline<E_IN, E_OUT> {
         /**
@@ -855,6 +928,17 @@ abstract class ReferencePipeline<P_IN, P_OUT>
      * @param <E_OUT> type of elements in produced by this stage
      * @since 1.8
      */
+    // [상태(Stateful) 중간 연산의 기반 클래스]
+    //
+    // 전체 또는 다수의 원소를 내부에 버퍼링해야 하는 연산들이 이 클래스를 확장한다.
+    // sorted (전체 원소를 모아 정렬), distinct (중복 추적), limit/skip (카운터) 등.
+    //
+    // opIsStateful() = true의 핵심 효과:
+    //   1. 순차 실행: 여전히 단일 패스지만 end()에서 버퍼 flush 가능.
+    //   2. 병렬 실행: AbstractPipeline.sourceSpliterator()에서 이 연산 직전까지를
+    //      먼저 평가(eager barrier)하여 결과를 새 Spliterator로 만든다.
+    //      이후 단계는 그 Spliterator를 소스로 다시 시작한다.
+    //   3. opEvaluateParallel()을 반드시 오버라이드해야 한다.
     abstract static class StatefulOp<E_IN, E_OUT>
             extends ReferencePipeline<E_IN, E_OUT> {
         /**

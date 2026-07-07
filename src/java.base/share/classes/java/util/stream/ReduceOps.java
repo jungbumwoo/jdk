@@ -48,6 +48,20 @@ import java.util.function.Supplier;
  *
  * @since 1.8
  */
+// [축약(Reduction) 터미널 연산 팩토리]
+//
+// reduce(), collect(), count() 등 다양한 축약 연산을 위한 TerminalOp 인스턴스를 생성한다.
+// 내부적으로 ReduceOp(추상 클래스) + AccumulatingSink 패턴을 사용한다.
+//
+// 핵심 추상화: AccumulatingSink
+//   - begin():   누산기(accumulator) 초기화
+//   - accept():  원소를 누산기에 반영
+//   - combine(): 두 부분 결과를 병합 — 병렬 스트림의 ForkJoin 병합에 사용
+//   - get():     최종 결과 반환
+//
+// 병렬 실행: ReduceTask(ForkJoinTask 서브클래스)가 Spliterator를 재귀적으로 분할하고,
+//   각 리프 태스크가 독립 ReducingSink로 부분 결과를 계산한 후
+//   onCompletion()에서 leftResult.combine(rightResult)로 트리 형태로 병합한다.
 final class ReduceOps {
 
     private ReduceOps() { }
@@ -65,6 +79,15 @@ final class ReduceOps {
      *        results
      * @return a {@code TerminalOp} implementing the reduction
      */
+    // [identity + BiFunction 버전 reduce — Stream.reduce(identity, accumulator, combiner)]
+    //
+    // ReducingSink 내부 동작:
+    //   begin():   state = seed (identity값으로 초기화)
+    //   accept():  state = reducer.apply(state, t) (원소마다 누적)
+    //   combine(): state = combiner.apply(state, other.state) (병렬 병합)
+    //
+    // evaluateSequential: wrapAndCopyInto(sink, spliterator) → sink.get()
+    // evaluateParallel:   new ReduceTask(...).invoke() → ForkJoin으로 분할 후 combine
     public static <T, U> TerminalOp<T, U>
     makeRef(U seed, BiFunction<U, ? super T, U> reducer, BinaryOperator<U> combiner) {
         Objects.requireNonNull(reducer);
@@ -72,16 +95,17 @@ final class ReduceOps {
         class ReducingSink extends Box<U> implements AccumulatingSink<T, U, ReducingSink> {
             @Override
             public void begin(long size) {
-                state = seed;
+                state = seed;   // 항등원(identity)으로 초기화
             }
 
             @Override
             public void accept(T t) {
-                state = reducer.apply(state, t);
+                state = reducer.apply(state, t);   // 원소마다 현재 상태에 누적
             }
 
             @Override
             public void combine(ReducingSink other) {
+                // 병렬 서브태스크 결과 병합: ForkJoin onCompletion에서 호출됨
                 state = combiner.apply(state, other.state);
             }
         }
@@ -152,6 +176,15 @@ final class ReduceOps {
      * @param collector a {@code Collector} defining the reduction
      * @return a {@code ReduceOp} implementing the reduction
      */
+    // [Collector 버전 collect — Stream.collect(collector)]
+    //
+    // Collector의 네 함수를 ReducingSink에 직접 연결한다:
+    //   supplier()    → begin()에서 컨테이너 생성
+    //   accumulator() → accept()에서 원소를 컨테이너에 누적
+    //   combiner()    → combine()에서 병렬 서브태스크 컨테이너 병합
+    //
+    // UNORDERED 특성이 있으면 NOT_ORDERED 플래그를 설정하여 순서 제약을 해제한다.
+    // (Collector.finisher()는 ReferencePipeline.collect()에서 별도로 호출됨)
     public static <T, I> TerminalOp<T, I>
     makeRef(Collector<? super T, I, ?> collector) {
         Supplier<I> supplier = Objects.requireNonNull(collector).supplier();
@@ -161,16 +194,17 @@ final class ReduceOps {
                 implements AccumulatingSink<T, I, ReducingSink> {
             @Override
             public void begin(long size) {
-                state = supplier.get();
+                state = supplier.get();   // 각 (서브)태스크마다 독립 컨테이너 생성
             }
 
             @Override
             public void accept(T t) {
-                accumulator.accept(state, t);
+                accumulator.accept(state, t);   // 컨테이너에 원소 누적 (가변 축약)
             }
 
             @Override
             public void combine(ReducingSink other) {
+                // 병렬 완료 시 오른쪽 컨테이너를 왼쪽에 병합
                 state = combiner.apply(state, other.state);
             }
         }
@@ -182,6 +216,7 @@ final class ReduceOps {
 
             @Override
             public int getOpFlags() {
+                // UNORDERED collector이면 순서 제약 해제 → 병렬 최적화 가능
                 return collector.characteristics().contains(Collector.Characteristics.UNORDERED)
                        ? StreamOpFlag.NOT_ORDERED
                        : 0;
@@ -894,6 +929,15 @@ final class ReduceOps {
      * @param <R> the result type of the reducing operation
      * @param <S> the type of the {@code AccumulatingSink}
      */
+    // [TerminalOp 구현 — 축약 연산의 실행 진입점]
+    //
+    // evaluateSequential:
+    //   helper.wrapAndCopyInto(makeSink(), spliterator).get()
+    //   → 싱크 체인을 조립하고, 소스 원소를 밀어 넣은 후 결과를 꺼낸다.
+    //
+    // evaluateParallel:
+    //   new ReduceTask(this, helper, spliterator).invoke().get()
+    //   → ForkJoin 태스크로 분할 병렬 처리 후 결과 반환.
     private abstract static class ReduceOp<T, R, S extends AccumulatingSink<T, R, S>>
             implements TerminalOp<T, R> {
         private final StreamShape inputShape;
@@ -918,12 +962,14 @@ final class ReduceOps {
         @Override
         public <P_IN> R evaluateSequential(PipelineHelper<T> helper,
                                            Spliterator<P_IN> spliterator) {
+            // 순차 실행: 싱크 체인 조립 → 소스 원소 push → 결과 반환
             return helper.wrapAndCopyInto(makeSink(), spliterator).get();
         }
 
         @Override
         public <P_IN> R evaluateParallel(PipelineHelper<T> helper,
                                          Spliterator<P_IN> spliterator) {
+            // 병렬 실행: ForkJoin 태스크 생성 → invoke()로 동기 실행 → 결과 반환
             return new ReduceTask<>(this, helper, spliterator).invoke().get();
         }
     }
@@ -931,6 +977,16 @@ final class ReduceOps {
     /**
      * A {@code ForkJoinTask} for performing a parallel reduce operation.
      */
+    // [병렬 축약을 위한 ForkJoin 태스크]
+    //
+    // 분할-정복(divide and conquer) 패턴:
+    //   1. AbstractTask.compute()가 spliterator.trySplit()으로 소스를 반으로 분할.
+    //   2. 왼쪽/오른쪽 서브태스크를 재귀적으로 fork.
+    //   3. 리프 태스크(더 이상 분할 불가)는 doLeaf()를 호출하여 순차적으로 처리.
+    //   4. 각 서브태스크가 완료되면 onCompletion()에서 결과를 병합.
+    //
+    // doLeaf():       helper.wrapAndCopyInto(op.makeSink(), spliterator) — 싱크 체인으로 처리
+    // onCompletion(): leftResult.combine(rightResult) — 두 부분 결과를 하나로 합침
     @SuppressWarnings("serial")
     private static final class ReduceTask<P_IN, P_OUT, R,
                                           S extends AccumulatingSink<P_OUT, R, S>>
@@ -957,12 +1013,15 @@ final class ReduceOps {
 
         @Override
         protected S doLeaf() {
+            // 리프 태스크: 이 파티션의 원소들을 순차적으로 싱크 체인으로 처리
             return helper.wrapAndCopyInto(op.makeSink(), spliterator);
         }
 
         @Override
         public void onCompletion(CountedCompleter<?> caller) {
             if (!isLeaf()) {
+                // 내부 노드: 왼쪽 서브태스크 결과에 오른쪽 결과를 combine()으로 병합
+                // 결합 순서가 올바른 결과를 위해 왼쪽 기준으로 병합한다
                 S leftResult = leftChild.getLocalResult();
                 leftResult.combine(rightChild.getLocalResult());
                 setLocalResult(leftResult);

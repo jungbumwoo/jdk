@@ -42,6 +42,20 @@ import java.util.function.Supplier;
  *
  * @since 1.8
  */
+// [단락(short-circuit) 탐색 터미널 연산 — findFirst / findAny]
+//
+// findFirst: 소스 순서 기준 첫 번째 원소 반환 (IS_SHORT_CIRCUIT | 순서 유지)
+// findAny:   어떤 원소든 찾는 즉시 반환 (IS_SHORT_CIRCUIT | NOT_ORDERED — 병렬에서 빠름)
+//
+// 단락 메커니즘:
+//   FindSink.accept()가 첫 번째 원소를 받으면 hasValue = true 설정.
+//   FindSink.cancellationRequested()가 hasValue를 반환 → true가 되는 순간
+//   copyIntoWithCancel()의 루프가 더 이상 원소를 push하지 않는다.
+//
+// 병렬 실행:
+//   FindTask(AbstractShortCircuitTask)가 서브태스크로 분할.
+//   findAny: 가장 먼저 완료된 서브태스크가 shortCircuit(result)을 호출하여 나머지를 취소.
+//   findFirst: 가장 왼쪽(leftmost) 서브태스크의 결과를 선택하여 순서를 보장.
 final class FindOps {
 
     private FindOps() { }
@@ -103,6 +117,17 @@ final class FindOps {
      * @param <O> the result type of the find operation, typically an optional
      *        type
      */
+    // [단락 탐색 TerminalOp 구현체]
+    //
+    // opFlags에 IS_SHORT_CIRCUIT을 항상 포함 → copyInto()가 단락 경로를 선택.
+    // mustFindFirst=false(findAny)이면 추가로 NOT_ORDERED → 병렬 시 순서 무시 허용.
+    //
+    // evaluateSequential: wrapAndCopyInto(sinkSupplier.get(), spliterator).get()
+    //   → FindSink가 첫 원소를 받으면 cancellationRequested()=true, 루프 중단.
+    //
+    // evaluateParallel: new FindTask(mustFindFirst, helper, spliterator).invoke()
+    //   → 분할 탐색. findAny는 첫 완료 서브태스크가 shortCircuit()으로 전체 취소.
+    //   → findFirst는 leftmost 서브태스크 결과를 선택(순서 보장).
     private static final class FindOp<T, O> implements TerminalOp<T, O> {
         private final StreamShape shape;
         final int opFlags;
@@ -127,6 +152,8 @@ final class FindOps {
                        O emptyValue,
                        Predicate<O> presentPredicate,
                        Supplier<TerminalSink<T, O>> sinkSupplier) {
+            // IS_SHORT_CIRCUIT: 항상 단락 연산임을 파이프라인에 알림
+            // NOT_ORDERED(findAny만): 병렬 시 순서 무관하게 아무 원소나 반환 허용
             this.opFlags = StreamOpFlag.IS_SHORT_CIRCUIT | (mustFindFirst ? 0 : StreamOpFlag.NOT_ORDERED);
             this.shape = shape;
             this.emptyValue = emptyValue;
@@ -168,22 +195,32 @@ final class FindOps {
      * @param <T> The type of input element
      * @param <O> The result type, typically an optional type
      */
+    // [단락 탐색 싱크 — 원소를 받자마자 중단 신호를 보내는 핵심 싱크]
+    //
+    // accept(): 첫 번째 원소만 저장하고 hasValue = true 설정. 이후 원소는 무시.
+    // cancellationRequested(): hasValue를 그대로 반환.
+    //   → 첫 원소를 받은 즉시 true가 되어 copyIntoWithCancel 루프를 탈출시킨다.
+    //
+    // OfRef.OP_FIND_FIRST / OP_FIND_ANY: 정적으로 미리 생성된 FindOp 싱글톤.
+    //   동일한 FindOp 인스턴스를 재사용하지만, 매 평가마다 makeSink()로 새 FindSink를 생성한다.
     private abstract static class FindSink<T, O> implements TerminalSink<T, O> {
-        boolean hasValue;
-        T value;
+        boolean hasValue;   // 원소를 이미 찾았는지 여부
+        T value;            // 찾은 원소
 
         FindSink() {} // Avoid creation of special accessor
 
         @Override
         public void accept(T value) {
             if (!hasValue) {
-                hasValue = true;
+                hasValue = true;   // 첫 원소만 저장
                 this.value = value;
             }
+            // 이후 원소는 무시 — cancellationRequested()가 이미 true이므로 도달하지 않아야 함
         }
 
         @Override
         public boolean cancellationRequested() {
+            // 원소를 찾은 순간 true → 소스에서 더 이상 원소를 push하지 않도록 신호
             return hasValue;
         }
 

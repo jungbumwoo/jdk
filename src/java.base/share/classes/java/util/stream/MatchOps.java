@@ -39,6 +39,26 @@ import java.util.function.Supplier;
  *
  * @since 1.8
  */
+// [단락(short-circuit) 조건 검사 터미널 연산 — anyMatch / allMatch / noneMatch]
+//
+// MatchKind 열거형으로 세 가지 의미론을 하나의 구현에 통합:
+//
+//   ANY:  (stopOnPredicateMatches=true,  shortCircuitResult=true)
+//         predicate가 true인 원소를 만나면 즉시 true 반환.
+//
+//   ALL:  (stopOnPredicateMatches=false, shortCircuitResult=false)
+//         predicate가 false인 원소를 만나면 즉시 false 반환.
+//         (ALL의 경우 "predicate가 매치 안되면" 중단)
+//
+//   NONE: (stopOnPredicateMatches=true,  shortCircuitResult=false)
+//         predicate가 true인 원소를 만나면 즉시 false 반환.
+//
+// 단락 메커니즘:
+//   MatchSink.accept()에서 stop=true를 설정하면
+//   BooleanTerminalSink.cancellationRequested()가 stop을 반환 → 루프 즉시 중단.
+//
+// 초기값: BooleanTerminalSink 생성자에서 value = !shortCircuitResult 으로 초기화.
+//   → 원소가 없을 때 anyMatch=false, allMatch=true, noneMatch=true 를 자연스럽게 표현.
 final class MatchOps {
 
     private MatchOps() { }
@@ -47,6 +67,17 @@ final class MatchOps {
      * Enum describing quantified match options -- all match, any match, none
      * match.
      */
+    // [매치 종류를 나타내는 열거형]
+    //
+    // stopOnPredicateMatches: predicate 결과가 이 값일 때 즉시 중단(단락)한다.
+    //   anyMatch: predicate=true  → 매치됨 → 중단
+    //   allMatch: predicate=false → 매치 안됨 → 중단
+    //   noneMatch: predicate=true → 매치됨 → 중단
+    //
+    // shortCircuitResult: 단락 시 반환할 결과값.
+    //   anyMatch: true (찾았으니 true)
+    //   allMatch: false (반례를 찾았으니 false)
+    //   noneMatch: false (매치를 찾았으니 false)
     enum MatchKind {
         /** Do any elements match the predicate? */
         ANY(true, true),
@@ -76,6 +107,20 @@ final class MatchOps {
      * @return a {@code TerminalOp} implementing the desired quantified match
      *         criteria
      */
+    // [참조 타입 스트림용 매치 싱크 — anyMatch/allMatch/noneMatch의 실제 로직]
+    //
+    // accept()의 핵심 로직:
+    //   predicate.test(t) == matchKind.stopOnPredicateMatches  이면 단락 조건 충족.
+    //   stop = true, value = matchKind.shortCircuitResult 를 설정한다.
+    //
+    // 예) anyMatch(p):
+    //   p.test(t) == true (ANY.stopOnPredicateMatches)  → stop=true, value=true
+    //
+    // 예) allMatch(p):
+    //   !p.test(t) == false (ALL.stopOnPredicateMatches=false, !test == true일 때)
+    //   즉 p.test(t)=false → stop=true, value=false
+    //
+    // BooleanTerminalSink.cancellationRequested()는 stop 필드를 반환한다.
     public static <T> TerminalOp<T, Boolean> makeRef(Predicate<? super T> predicate,
             MatchKind matchKind) {
         Objects.requireNonNull(predicate);
@@ -88,6 +133,7 @@ final class MatchOps {
             @Override
             public void accept(T t) {
                 if (!stop && predicate.test(t) == matchKind.stopOnPredicateMatches) {
+                    // 단락 조건 충족: 결과값 저장 후 stop=true로 루프 중단 신호
                     stop = true;
                     value = matchKind.shortCircuitResult;
                 }
@@ -249,11 +295,21 @@ final class MatchOps {
      *
      * @param <T> The output type of the stream pipeline
      */
+    // [단락 매치 싱크의 기반 클래스]
+    //
+    // stop:  단락 신호 플래그. accept()에서 단락 조건이 충족되면 true로 설정.
+    // value: 결과값. 초기값은 !shortCircuitResult.
+    //   → 빈 스트림의 경우 anyMatch=false, allMatch=true, noneMatch=true 가 자연스럽게 나온다.
+    //
+    // cancellationRequested(): stop을 반환하여 단락 루프에 중단 신호 전달.
+    // getAndClearState():      값을 반환 (boolean이므로 boxing 없음).
     private abstract static class BooleanTerminalSink<T> implements Sink<T> {
         boolean stop;
         boolean value;
 
         BooleanTerminalSink(MatchKind matchKind) {
+            // 초기값: 단락 없이 모든 원소를 처리했을 때의 기본 결과
+            // anyMatch → false (하나도 안 찾음), allMatch → true (모두 통과), noneMatch → true (하나도 없음)
             value = !matchKind.shortCircuitResult;
         }
 
@@ -263,7 +319,7 @@ final class MatchOps {
 
         @Override
         public boolean cancellationRequested() {
-            return stop;
+            return stop;   // stop=true이면 더 이상 원소를 받지 않겠다는 신호
         }
     }
 
