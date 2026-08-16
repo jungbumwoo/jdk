@@ -3589,6 +3589,10 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
 
         public KeySpliterator<K,V> trySplit() {
             int i, f, h;
+            // [ConcurrentHashMap table 범위 이등분]
+            // baseIndex/baseLimit의 중간값으로 table 구간을 나눈다. HashMap과 달리
+            // Traverser가 resize 중의 forwarding node도 추적하며, fail-fast 대신
+            // weakly-consistent하게 동시 변경을 허용한다.
             return (h = ((i = baseIndex) + (f = baseLimit)) >>> 1) <= i ? null :
                 new KeySpliterator<K,V>(tab, baseSize, baseLimit = h,
                                         f, est >>>= 1);
@@ -3628,6 +3632,7 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
 
         public ValueSpliterator<K,V> trySplit() {
             int i, f, h;
+            // KeySpliterator와 같은 table 구간을 분할하고 value를 전달한다.
             return (h = ((i = baseIndex) + (f = baseLimit)) >>> 1) <= i ? null :
                 new ValueSpliterator<K,V>(tab, baseSize, baseLimit = h,
                                           f, est >>>= 1);
@@ -3668,6 +3673,7 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
 
         public EntrySpliterator<K,V> trySplit() {
             int i, f, h;
+            // Key/Value와 같은 구간을 분할하며 결과를 Map.Entry로 노출한다.
             return (h = ((i = baseIndex) + (f = baseLimit)) >>> 1) <= i ? null :
                 new EntrySpliterator<K,V>(tab, baseSize, baseLimit = h,
                                           f, est >>>= 1, map);

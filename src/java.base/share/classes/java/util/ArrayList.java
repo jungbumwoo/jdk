@@ -1628,6 +1628,9 @@ public class ArrayList<E> extends AbstractList<E>
      * @since 1.8
      */
     @Override
+    // [ArrayList source]
+    // elementData의 인덱스 범위를 담당하는 late-binding Spliterator를 만든다.
+    // fence=-1은 첫 순회/분할 시점에 size와 modCount를 확정한다는 뜻이다.
     public Spliterator<E> spliterator() {
         return new ArrayListSpliterator(0, -1, 0);
     }
@@ -1687,6 +1690,9 @@ public class ArrayList<E> extends AbstractList<E>
 
         public ArrayListSpliterator trySplit() {
             int hi = getFence(), lo = index, mid = (lo + hi) >>> 1;
+            // [인덱스 범위의 정확한 이등분]
+            // 반환 객체는 prefix [lo, mid)를 맡고, 대입식 index=mid에 의해
+            // 현재 객체는 suffix [mid, hi)를 맡는다. 배열 접근이므로 분할은 O(1)이다.
             return (lo >= mid) ? null : // divide range in half unless too small
                 new ArrayListSpliterator(lo, index = mid, expectedModCount);
         }

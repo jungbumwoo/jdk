@@ -137,6 +137,16 @@ final class GathererOp<T, A, R> extends ReferencePipeline<T, R> {
         private boolean proceed = true;
         private boolean downstreamProceed = true;
 
+        /*
+         * stream 구현에서 coroutine에 가장 가까운 지점 중 하나다.
+         * 별도 coroutine 스케줄러는 없지만, integrator가 `state`를 유지한 채
+         * accept()/push() 호출마다 조금씩 진행되고, `proceed`/`downstreamProceed`
+         * 플래그로 다음 재진입 여부를 협력적으로 결정한다.
+         *
+         * 즉 "suspend/resume"를 런타임이 제공하는 것은 아니고, 상태를 객체 필드에
+         * 저장한 stackless state machine을 메서드 호출로 구동하는 형태다.
+         */
+
         GatherSink(Gatherer<T, A, R> gatherer, Sink<R> sink) {
             this.gatherer = gatherer;
             this.sink = sink;
@@ -162,6 +172,8 @@ final class GathererOp<T, A, R> extends ReferencePipeline<T, R> {
              * As of writing this, taking `greedy` or `stateless` into
              * consideration at this point doesn't yield any performance gains.
              */
+            // integrator는 input 1개를 소비하면서 output 0..N개를 push할 수 있다.
+            // 이런 "입력 소비와 출력 생성의 교차" 때문에 GatherSink가 특히 coroutine-like하다.
             proceed &= integrator.integrate(state, t, this);
         }
 

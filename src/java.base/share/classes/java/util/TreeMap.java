@@ -3083,6 +3083,10 @@ public class TreeMap<K,V>
         public KeySpliterator<K,V> trySplit() {
             if (est < 0)
                 getEstimate(); // force initialization
+            // [TreeMap의 구조 기반 분할]
+            // 인덱스가 없으므로 최초에는 root, 이후에는 현재 side에 맞는 서브트리
+            // 노드를 split fence 후보로 삼는다.
+            // 정렬 순서는 유지되지만 각 노드가 balanced 하지 않다면 정확이 이등분 된다는 보장이 없는듯
             int d = side;
             TreeMap.Entry<K,V> e = current, f = fence,
                 s = ((e == null || e == f) ? null :      // empty
@@ -3161,6 +3165,8 @@ public class TreeMap<K,V>
         public DescendingKeySpliterator<K,V> trySplit() {
             if (est < 0)
                 getEstimate(); // force initialization
+            // KeySpliterator의 역순 버전: left/right 선택과 key 비교 방향을 뒤집어
+            // descending encounter order를 유지하면서 서브트리 경계를 잡는다.
             int d = side;
             TreeMap.Entry<K,V> e = current, f = fence,
                     s = ((e == null || e == f) ? null :      // empty
@@ -3234,6 +3240,7 @@ public class TreeMap<K,V>
         public ValueSpliterator<K,V> trySplit() {
             if (est < 0)
                 getEstimate(); // force initialization
+            // KeySpliterator와 동일한 서브트리 경계 전략을 사용하고 value를 전달한다.
             int d = side;
             TreeMap.Entry<K,V> e = current, f = fence,
                     s = ((e == null || e == f) ? null :      // empty
@@ -3306,6 +3313,7 @@ public class TreeMap<K,V>
         public EntrySpliterator<K,V> trySplit() {
             if (est < 0)
                 getEstimate(); // force initialization
+            // Key/Value와 동일한 서브트리 경계를 사용하고 entry를 전달한다.
             int d = side;
             TreeMap.Entry<K,V> e = current, f = fence,
                     s = ((e == null || e == f) ? null :      // empty

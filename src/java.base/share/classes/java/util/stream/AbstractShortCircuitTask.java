@@ -106,6 +106,9 @@ abstract class AbstractShortCircuitTask<P_IN, P_OUT, R,
         @SuppressWarnings("unchecked") K task = (K) this;
         AtomicReference<R> sr = sharedResult;
         R result;
+        // [find/match 계열의 분할 루프]
+        // 일반 AbstractTask와 같은 trySplit 전략을 쓰되, 다른 task가 sharedResult를
+        // 먼저 설정했거나 취소된 경우 더 이상의 분할과 leaf 계산을 중단한다.
         while ((result = sr.get()) == null) {
             if (task.taskCanceled()) {
                 result = task.getEmptyResult();

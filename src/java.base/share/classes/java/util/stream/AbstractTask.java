@@ -77,6 +77,22 @@ import java.util.concurrent.ForkJoinWorkerThread;
  * <p>Serialization is not supported as there is no intention to serialize
  * tasks managed by stream ops.
  *
+ *  기본 실행 방식
+ *  Spliterator
+ *       │ trySplit()
+ *       ├──────────────┐
+ *       ▼              ▼
+ *   left task       right task
+ *       │              │
+ *     doLeaf()       doLeaf()
+ *       └──────┬───────┘
+ *              ▼
+ *         onCompletion()
+ *           결과 결합
+ *
+ * - doLeaf(): 각 파티션을 순차 Sink 체인으로 축약
+ * - onCompletion(): 왼쪽과 오른쪽 결과를 combine()으로 결합
+ *
  * @param <P_IN> Type of elements input to the pipeline
  * @param <P_OUT> Type of elements output from the pipeline
  * @param <R> Type of intermediate result, which may be different from operation
@@ -192,6 +208,8 @@ abstract class AbstractTask<P_IN, P_OUT, R,
      * @return suggested target leaf size
      */
     public static long suggestTargetSize(long sizeEstimate) {
+        // 병렬처리 수치 보다 더 많은 leaf를 만들어 work-stealing이 가능하게 하고
+        // 불균등한 splited size leaf 에 대응한다.
         long est = sizeEstimate / getLeafTarget();
         return est > 0L ? est : 1L;
     }
@@ -305,6 +323,9 @@ abstract class AbstractTask<P_IN, P_OUT, R,
         long sizeThreshold = getTargetSize(sizeEstimate);
         boolean forkRight = false;
         @SuppressWarnings("unchecked") K task = (K) this;
+        // [병렬 Stream이 source.trySplit()을 실제 호출하는 핵심 루프]
+        // trySplit()이 반환한 prefix가 ls(left), 분할 후 원본 rs가 right가 된다.
+        // 추정 크기가 leaf 임계값 이하이거나 더 나눌 수 없을 때 doLeaf()로 내려간다.
         while (sizeEstimate > sizeThreshold && (ls = rs.trySplit()) != null) {
             K leftChild, rightChild, taskToFork;
             task.leftChild  = leftChild = task.makeChild(ls);
@@ -321,6 +342,7 @@ abstract class AbstractTask<P_IN, P_OUT, R,
                 task = rightChild;
                 taskToFork = leftChild;
             }
+            // 한쪽은 fork하고 다른 쪽은 현재 스레드가 계속 처리
             taskToFork.fork();
             sizeEstimate = rs.estimateSize();
         }
