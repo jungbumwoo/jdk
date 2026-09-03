@@ -725,6 +725,10 @@ public interface Collection<E> extends Iterable<E> {
      * @since 1.8
      */
     @Override
+    // [기본 Collection 소스]
+    // 전용 Spliterator가 없는 Collection은 IteratorSpliterator를 사용한다.
+    // Iterator는 임의 위치로 이동할 수 없으므로 trySplit() 시 원소를 배치 배열로
+    // 복사하며, ArrayList 같은 인덱스 기반 구현보다 병렬 분할 비용이 크다.
     default Spliterator<E> spliterator() {
         return Spliterators.spliterator(this, 0);
     }
@@ -744,6 +748,8 @@ public interface Collection<E> extends Iterable<E> {
      * @return a sequential {@code Stream} over the elements in this collection
      * @since 1.8
      */
+    // [순차 Stream 연결]
+    // Collection의 Spliterator를 source로 넘기고 parallel=false로 파이프라인을 만든다.
     default Stream<E> stream() {
         return StreamSupport.stream(spliterator(), false);
     }
@@ -765,6 +771,9 @@ public interface Collection<E> extends Iterable<E> {
      * collection
      * @since 1.8
      */
+    // [병렬 Stream 연결]
+    // 여기서는 아직 분할하지 않는다. 터미널 연산의 병렬 task가 실행될 때
+    // source Spliterator의 estimateSize()와 trySplit()이 실제로 사용된다.
     default Stream<E> parallelStream() {
         return StreamSupport.stream(spliterator(), true);
     }

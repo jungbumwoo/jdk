@@ -70,10 +70,33 @@ import java.util.function.Supplier;
  * @since 1.8
  */
 // [스트림 파이프라인의 핵심 뼈대]
+// stage 연결, flags, 지연 평가, source 확보, Sink 체인 조립 등 공통 실행 엔진
 // Stream 파이프라인의 각 "스테이지(stage)"를 나타내는 추상 기반 클래스.
 // .filter(), .map() 등 중간 연산을 호출할 때마다 이 클래스의 서브클래스 인스턴스가
 // 하나씩 생성되어 양방향 연결 리스트(doubly-linked list)로 이어진다.
 // 데이터는 터미널 연산(forEach, collect 등)이 호출되기 전까지 전혀 흐르지 않는다 — 게으른 평가(lazy evaluation).
+/*
+* 각 중간 연산은 새로운 AbstractPipeline 객체를 생성합니다.
+
+  AbstractPipeline(AbstractPipeline<?, E_IN, ?> previousStage,
+                   int opFlags) {
+      previousStage.linkedOrConsumed = true;
+      previousStage.nextStage = this;
+
+      this.previousStage = previousStage;
+      this.sourceStage = previousStage.sourceStage;
+      this.depth = previousStage.depth + 1;
+  }
+
+  각 stage는 대략 다음 정보를 가집니다.
+
+  sourceStage      파이프라인의 Head
+  previousStage    이전 연산
+  nextStage        다음 연산
+  depth            소스에서 현재 stage까지의 거리
+  sourceOrOpFlags  현재 연산의 특성
+  combinedFlags    지금까지 누적된 특성
+* */
 abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
         extends PipelineHelper<E_OUT> implements BaseStream<E_OUT, S> {
     private static final String MSG_STREAM_LINKED = "stream has already been operated upon or closed";
@@ -291,7 +314,6 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
     }
 
     // Terminal evaluation methods
-
     /**
      * Evaluate the pipeline with a terminal operation to produce a result.
      *
@@ -299,6 +321,22 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
      * @param terminalOp the terminal operation to be applied to the pipeline.
      * @return the result
      */
+    /*
+    실행은 여기 evaluate()가 진입점.
+    실행 방식의 알고리즘의 큰 흐름은 상위 클래스가 고정하고, 변하는 일부 단계만 하위 클래스가 구현하므로 Template Method 구조
+    * AbstractPipeline
+         ▲
+  ReferencePipeline
+         ▲
+   ┌─────┼───────────┐
+  Head   StatelessOp  StatefulOp
+         filter       sorted
+         map          distinct
+         peek         limit/skip
+
+  - StatelessOp: opIsStateful()을 false로 고정
+  - StatefulOp: opIsStateful()을 true로 고정하고 병렬 평가 메서드도 요구
+    * */
     // [실행 진입점 — 터미널 연산이 파이프라인을 평가할 때 반드시 이 메서드를 거친다]
     //
     // 흐름:
@@ -306,6 +344,7 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
     // 2. sourceSpliterator()로 소스를 확보 (지연된 Supplier가 있다면 이 시점에 실체화됨)
     // 3. 순차(sequential)이면 terminalOp.evaluateSequential() 호출
     //    병렬(parallel)이면 terminalOp.evaluateParallel() → ForkJoin 태스크로 분기
+    // Q. terminal operation이 실행되면 여기 evaluate가 어떻게 실행될 수 있는건지?
     final <R> R evaluate(TerminalOp<E_OUT, R> terminalOp) {
         assert getOutputShape() == terminalOp.inputShape();
         if (linkedOrConsumed)
@@ -683,6 +722,11 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
     //
     // 실행 시에는 FilterSink.accept(e) → MapSink.accept(e) → ReduceSink.accept(e) 순으로
     // 원소가 앞쪽에서 뒤쪽으로 흘러간다.
+    //
+    // coroutine과 비교하면, 여기서 만들어지는 것은 "재개 가능한 실행 프레임"이 아니라
+    // "서로를 감싼 상태 객체들의 호출 사슬"이다. 각 Sink는 자신의 필드에 상태를 유지하고
+    // accept()가 다시 호출될 때 이어서 동작하므로, 결과적으로 coroutine과 유사한 협력적
+    // 처리 흐름을 만들지만 구현 기법 자체는 일반 메서드 호출 + 객체 조합이다.
     @Override
     @SuppressWarnings("unchecked")
     final <P_IN> Sink<P_IN> wrapSink(Sink<E_OUT> sink) {

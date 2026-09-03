@@ -119,6 +119,13 @@ import java.util.function.LongConsumer;
 // Iterator/Spliterator가 "pull" 모델(소비자가 원소를 당겨옴)이라면,
 // Sink는 "push" 모델 — 소스가 원소를 싱크 체인으로 밀어 넣는다.
 //
+// coroutine 관점에서 보면:
+//   java.util.stream이 별도의 coroutine/continuation 런타임을 쓰는 것은 아니다.
+//   대신 각 Sink가 자신의 상태를 필드에 보관한 채 accept()/cancellationRequested() 호출마다
+//   다시 진입(re-entry)되므로, 업스트림과 다운스트림이 협력적으로 제어를 넘기는
+//   stackless coroutine 비슷한 구조로 이해할 수 있다.
+//   다만 실행은 여전히 일반적인 Java 메서드 호출과 루프 위에서 이루어진다.
+//
 // 생명주기:
 //   1. begin(size)  — 데이터 스트림 시작 알림. size=-1이면 크기 미지.
 //   2. accept(t)    — 원소 하나 처리 (Consumer<T>에서 상속).
@@ -127,6 +134,9 @@ import java.util.function.LongConsumer;
 // 단락(short-circuit) 지원:
 //   cancellationRequested()가 true를 반환하면 푸시를 즉시 중단.
 //   findFirst, limit, anyMatch 등에서 활용.
+/*
+*중간 연산 Sink는 downstream Sink를 감싼다. decorator pattern으로 되어있나?
+* */
 interface Sink<T> extends Consumer<T> {
     /**
      * Resets the sink state to receive a fresh data set.  This must be called
@@ -272,8 +282,12 @@ interface Sink<T> extends Consumer<T> {
     //
     // begin/end/cancellationRequested는 downstream에 그대로 위임(delegation)한다.
     // 서브클래스는 accept()만 오버라이드하여 자신의 변환/필터 로직 후 downstream.accept() 호출.
+    //
+    // 이 패턴이 stream 구현에서 coroutine-like하게 보이는 대표 지점이다.
+    // 각 스테이지는 독립 상태를 유지하면서 입력 1개를 받아 처리한 뒤 즉시 다음 스테이지로 넘기고,
+    // 필요하면 cancellationRequested()로 역방향 신호를 돌려 upstream 루프를 멈춘다.
     abstract static class ChainedReference<T, E_OUT> implements Sink<T> {
-        // 다음 스테이지의 싱크 — 이 싱크가 처리를 마친 원소를 여기로 전달한다.
+        // 중간 연산 Sink는 downstream Sink를 감싼다. 다음 스테이지의 싱크 — 이 싱크가 처리를 마친 원소를 여기로 전달한다.
         protected final Sink<? super E_OUT> downstream;
 
         public ChainedReference(Sink<? super E_OUT> downstream) {
@@ -291,7 +305,7 @@ interface Sink<T> extends Consumer<T> {
             downstream.end();
         }
 
-        // 단락 신호도 downstream에서 upstream으로 역방향 전파된다.
+        // downstream에서 upstream으로 역방향 전파된다.
         @Override
         public boolean cancellationRequested() {
             return downstream.cancellationRequested();

@@ -791,6 +791,8 @@ public class ArrayDeque<E> extends AbstractCollection<E>
      * @return a {@code Spliterator} over the elements in this deque
      * @since 1.8
      */
+    // [ArrayDeque source]
+    // head/tail이 감싸질 수 있는 원형 배열을 논리적 encounter order로 순회한다.
     public Spliterator<E> spliterator() {
         return new DeqSpliterator();
     }
@@ -825,6 +827,10 @@ public class ArrayDeque<E> extends AbstractCollection<E>
         public DeqSpliterator trySplit() {
             final Object[] es = elements;
             final int i, n;
+            // [원형 배열의 논리적 거리 이등분]
+            // sub(fence, cursor, length)로 wrap-around를 고려한 남은 길이를 구하고,
+            // 그 절반만큼 inc()하여 분할 경계를 계산한다. 반환 객체는 prefix,
+            // 갱신된 현재 객체는 suffix를 담당하며 원소 복사는 없다.
             return ((n = sub(getFence(), i = cursor, es.length) >> 1) <= 0)
                 ? null
                 : new DeqSpliterator(i, cursor = inc(i, n, es.length));

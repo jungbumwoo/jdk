@@ -995,6 +995,8 @@ public class HashMap<K,V> extends AbstractMap<K,V>
             return removeNode(hash(key), key, null, false, true) != null;
         }
         public final Spliterator<K> spliterator() {
+            // keySet().stream()/parallelStream()의 source. 원소 배열이 아니라
+            // HashMap.table의 bucket index 구간 [0, table.length)을 분할한다.
             return new KeySpliterator<>(HashMap.this, 0, -1, 0, 0);
         }
 
@@ -1052,6 +1054,8 @@ public class HashMap<K,V> extends AbstractMap<K,V>
         public final Iterator<V> iterator()     { return new ValueIterator(); }
         public final boolean contains(Object o) { return containsValue(o); }
         public final Spliterator<V> spliterator() {
+            // values()도 KeySpliterator와 같은 bucket 범위 분할 전략을 쓰며,
+            // 순회할 때 각 Node의 value를 downstream에 전달한다.
             return new ValueSpliterator<>(HashMap.this, 0, -1, 0, 0);
         }
 
@@ -1122,6 +1126,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
             return false;
         }
         public final Spliterator<Map.Entry<K,V>> spliterator() {
+            // entrySet()도 같은 bucket 범위를 분할하고 Node(entry)를 전달한다.
             return new EntrySpliterator<>(HashMap.this, 0, -1, 0, 0);
         }
         public final void forEach(Consumer<? super Map.Entry<K,V>> action) {
@@ -1688,6 +1693,11 @@ public class HashMap<K,V> extends AbstractMap<K,V>
 
         public KeySpliterator<K,V> trySplit() {
             int hi = getFence(), lo = index, mid = (lo + hi) >>> 1;
+            // [HashMap bucket 범위 이등분]
+            // 반환 객체는 table[lo..mid), 현재 객체는 table[mid..hi)를 맡는다.
+            // bucket별 원소 수가 다르므로 index를 반으로 나눠도 실제 작업량은
+            // 균등하지 않을 수 있다. current!=null이면 bucket 순회가 시작된
+            // 상태이므로 해당 연결 구조 내부를 더 분할하지 않는다.
             return (lo >= mid || current != null) ? null :
                 new KeySpliterator<>(map, lo, index = mid, est >>>= 1,
                                         expectedModCount);
@@ -1760,6 +1770,8 @@ public class HashMap<K,V> extends AbstractMap<K,V>
 
         public ValueSpliterator<K,V> trySplit() {
             int hi = getFence(), lo = index, mid = (lo + hi) >>> 1;
+            // KeySpliterator와 동일하게 bucket index 범위를 반분한다.
+            // est는 실제 재계수 없이 추정치만 절반(est >>>= 1)으로 줄인다.
             return (lo >= mid || current != null) ? null :
                 new ValueSpliterator<>(map, lo, index = mid, est >>>= 1,
                                           expectedModCount);
@@ -1831,6 +1843,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
 
         public EntrySpliterator<K,V> trySplit() {
             int hi = getFence(), lo = index, mid = (lo + hi) >>> 1;
+            // Key/Value와 동일한 범위를 사용하되 순회 결과로 Node(entry)를 전달한다.
             return (lo >= mid || current != null) ? null :
                 new EntrySpliterator<>(map, lo, index = mid, est >>>= 1,
                                           expectedModCount);

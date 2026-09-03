@@ -1181,6 +1181,9 @@ public class LinkedList<E>
      * @since 1.8
      */
     @Override
+    // [LinkedList source]
+    // 연결 노드는 중간 인덱스로 즉시 이동할 수 없으므로 ArrayList와 달리
+    // 전용 LLSpliterator가 노드를 순서대로 읽어 배치 배열로 분할한다.
     public Spliterator<E> spliterator() {
         return new LLSpliterator<>(this, -1, 0);
     }
@@ -1218,21 +1221,34 @@ public class LinkedList<E>
 
         public long estimateSize() { return (long) getEst(); }
 
+        /*
+        *  LinkedList 병렬 처리는 다음 비용을 가집니다.
+            - 노드를 순회하는 포인터 추적 비용
+            - 임시 배열 할당 비용
+            - 노드 원소를 배열에 복사하는 비용
+            - 낮은 메모리 지역성
+        * */
         public Spliterator<E> trySplit() {
             Node<E> p;
             int s = getEst();
             if (s > 1 && (p = current) != null) {
+                // [연결 리스트의 배치 분할]
+                // 첫 split은 최대 1,024개, 다음 split은 최대 2,048개처럼
+                // BATCH_UNIT만큼 증가시킨다(MAX_BATCH 상한 적용).
                 int n = batch + BATCH_UNIT;
                 if (n > s)
                     n = s;
                 if (n > MAX_BATCH)
                     n = MAX_BATCH;
+                // 앞쪽 노드들을 임시 배열로 복사
                 Object[] a = new Object[n];
                 int j = 0;
                 do { a[j++] = p.item; } while ((p = p.next) != null && j < n);
                 current = p;
                 batch = j;
                 est = s - j;
+                // 반환된 prefix는 배열 Spliterator이므로 이후에는 인덱스로 O(1)
+                // 이등분할 수 있다. 현재 LLSpliterator는 남은 노드 p부터 계속한다.
                 return Spliterators.spliterator(a, 0, j, Spliterator.ORDERED);
             }
             return null;

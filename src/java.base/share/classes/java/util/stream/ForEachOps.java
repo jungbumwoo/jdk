@@ -287,6 +287,9 @@ final class ForEachOps {
             boolean forkRight = false;
             Sink<S> taskSink = sink;
             ForEachTask<S, T> task = this;
+            // [병렬 forEach의 직접 분할 루프]
+            // forEach는 결과 병합용 child tree가 필요 없어서 AbstractTask를 상속하지
+            // 않지만, 동일하게 source.trySplit()을 반복하고 한쪽 task를 fork한다.
             while (!isShortCircuit || !taskSink.cancellationRequested()) {
                 if (sizeEstimate <= sizeThreshold ||
                     (leftSplit = rightSplit.trySplit()) == null) {
@@ -406,6 +409,9 @@ final class ForEachOps {
             Spliterator<S> rightSplit = task.spliterator, leftSplit;
             long sizeThreshold = task.targetSize;
             boolean forkRight = false;
+            // [병렬 forEachOrdered의 분할]
+            // source 분할 자체는 같지만 child 사이에 predecessor 관계를 등록하여
+            // 왼쪽 범위가 완료된 뒤 오른쪽 범위의 결과가 전달되도록 순서를 보장한다.
             while (rightSplit.estimateSize() > sizeThreshold &&
                    (leftSplit = rightSplit.trySplit()) != null) {
                 ForEachOrderedTask<S, T> leftChild =

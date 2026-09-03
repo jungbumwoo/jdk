@@ -1005,6 +1005,9 @@ public final class Spliterators {
         public Spliterator<T> trySplit() {
             int lo = index, mid = (lo + fence) >>> 1;
             if (lo >= mid) return null;
+            // [배열 source의 범위 이등분]
+            // 새 Spliterator가 prefix [lo, mid)를 반환하고, 현재 객체의 index를
+            // mid로 옮겨 suffix [mid, fence)를 남긴다. 원소 복사는 발생하지 않는다.
             if (estimatedSize == -1) {
                 return new ArraySpliterator<>(array, lo, index = mid, characteristics);
             }
@@ -1106,6 +1109,8 @@ public final class Spliterators {
         public OfInt trySplit() {
             int lo = index, mid = (lo + fence) >>> 1;
             if (lo >= mid) return null;
+            // Object[] ArraySpliterator와 같은 [lo, mid) / [mid, fence) 분할이며
+            // int 전용 구현으로 boxing 없이 원소를 전달한다.
             if (estimatedSize == -1) {
                 return new IntArraySpliterator(array, lo, index = mid, characteristics);
             }
@@ -1205,6 +1210,7 @@ public final class Spliterators {
         public OfLong trySplit() {
             int lo = index, mid = (lo + fence) >>> 1;
             if (lo >= mid) return null;
+            // ArraySpliterator와 동일한 O(1) 범위 분할의 long 특수화 구현이다.
             if (estimatedSize == -1) {
                 return new LongArraySpliterator(array, lo, index = mid, characteristics);
             }
@@ -1304,6 +1310,7 @@ public final class Spliterators {
         public OfDouble trySplit() {
             int lo = index, mid = (lo + fence) >>> 1;
             if (lo >= mid) return null;
+            // ArraySpliterator와 동일한 O(1) 범위 분할의 double 특수화 구현이다.
             if (estimatedSize == -1) {
                 return new DoubleArraySpliterator(array, lo, index = mid, characteristics);
             }
@@ -1910,6 +1917,9 @@ public final class Spliterators {
             else
                 s = est;
             if (s > 1 && i.hasNext()) {
+                // [Iterator 기반 source의 제한적 병렬화]
+                // Iterator에는 중앙 위치로 건너뛰는 연산이 없으므로 앞쪽 원소를
+                // 증가하는 크기의 임시 배열로 복사하여 split 결과로 반환한다.
                 int n = batch + BATCH_UNIT;
                 if (n > s)
                     n = (int) s;
@@ -1921,6 +1931,7 @@ public final class Spliterators {
                 batch = j;
                 if (est != Long.MAX_VALUE) {
                     est -= j;
+                    // 배열로 옮긴 prefix는 ArraySpliterator가 다시 O(1)로 이등분한다.
                     return new ArraySpliterator<>(a, 0, j, characteristics);
                 }
                 return new ArraySpliterator<>(a, 0, j, characteristics, Long.MAX_VALUE / 2);

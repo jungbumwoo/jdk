@@ -142,6 +142,8 @@ abstract class PipelineHelper<P_OUT> {
     abstract <P_IN> boolean copyIntoWithCancel(Sink<P_IN> wrappedSink, Spliterator<P_IN> spliterator);
 
     /**
+     * 이거 구현체 어디? -> 각 ${type}Pipline.java 에 opWrapSink method 구현인듯.
+     *
      * Takes a {@code Sink} that accepts elements of the output type of the
      * {@code PipelineHelper}, and wrap it with a {@code Sink} that accepts
      * elements of the input type and implements all the intermediate operations

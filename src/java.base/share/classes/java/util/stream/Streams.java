@@ -130,6 +130,10 @@ final class Streams {
         @Override
         public Spliterator.OfInt trySplit() {
             long size = estimateSize();
+            // [IntStream.range/rangeClosed의 숫자 범위 분할]
+            // 반환 객체는 [from, splitPoint), 현재 객체는 splitPoint 이후를 맡는다.
+            // 작은/보통 범위는 1:1, 매우 큰 범위는 1:7로 분할하여 limit 같은
+            // 선두 단락 연산이 앞쪽 범위를 더 낮은 task 깊이에서 처리하게 한다.
             return size <= 1
                    ? null
                    // Left split always has a half-open range
@@ -143,6 +147,7 @@ final class Streams {
          * 1:(RIGHT_BALANCED_SPLIT_RATIO - 1)
          * to produce right-balanced splits.
          *
+         * 크기가 커지면 분할할 때 반반하는게 아니라 앞쪽 데이터가 먼저 처리되도록 반반이 아니라 앞쪽꺼 먼저 자른다.
          * <p>Such splitting ensures that for very large ranges that the left
          * side of the range will more likely be processed at a lower-depth
          * than a balanced tree at the expense of a higher-depth for the right
@@ -253,6 +258,8 @@ final class Streams {
         @Override
         public Spliterator.OfLong trySplit() {
             long size = estimateSize();
+            // RangeIntSpliterator와 같은 전략이다. long 범위 자체를 나누므로
+            // 컬렉션 생성이나 원소 복사 없이 O(1)로 split한다.
             return size <= 1
                    ? null
                    // Left split always has a half-open range

@@ -1167,6 +1167,9 @@ public class CopyOnWriteArrayList<E>
      * @return a {@code Spliterator} over the elements in this list
      * @since 1.8
      */
+    // [CopyOnWriteArrayList source]
+    // 생성 시점의 내부 배열 snapshot을 ArraySpliterator에 전달한다. 이후 쓰기는
+    // 다른 배열에 일어나므로 순회 중 lock이나 modCount 검사가 필요하지 않다.
     public Spliterator<E> spliterator() {
         return Spliterators.spliterator
             (getArray(), Spliterator.IMMUTABLE | Spliterator.ORDERED);

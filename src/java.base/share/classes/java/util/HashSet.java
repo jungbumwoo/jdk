@@ -368,6 +368,9 @@ public class HashSet<E>
      * @return a {@code Spliterator} over the elements in this set
      * @since 1.8
      */
+    // [HashSet source]
+    // HashSet은 원소를 backing HashMap의 key로 저장하므로 별도 분할 구현 없이
+    // HashMap.KeySpliterator의 bucket index 분할 전략을 그대로 재사용한다.
     public Spliterator<E> spliterator() {
         return new HashMap.KeySpliterator<>(map, 0, -1, 0, 0);
     }

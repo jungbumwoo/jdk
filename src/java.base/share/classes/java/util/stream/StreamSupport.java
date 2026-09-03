@@ -66,6 +66,9 @@ public final class StreamSupport {
      */
     public static <T> Stream<T> stream(Spliterator<T> spliterator, boolean parallel) {
         Objects.requireNonNull(spliterator);
+        // [Spliterator source -> Stream pipeline 연결]
+        // source 객체와 characteristics, 실행 모드만 Head에 기록한다. 여기서는
+        // trySplit/순회를 하지 않고, 터미널 연산이 평가될 때까지 실행을 미룬다.
         return new ReferencePipeline.Head<>(spliterator,
                                             StreamOpFlag.fromCharacteristics(spliterator),
                                             parallel);
@@ -108,6 +111,7 @@ public final class StreamSupport {
                                        int characteristics,
                                        boolean parallel) {
         Objects.requireNonNull(supplier);
+        // Supplier 버전은 Spliterator 생성까지 터미널 연산 시작 시점으로 미룬다.
         return new ReferencePipeline.Head<>(supplier,
                                             StreamOpFlag.fromCharacteristics(characteristics),
                                             parallel);

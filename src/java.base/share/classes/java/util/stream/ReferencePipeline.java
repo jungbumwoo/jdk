@@ -64,6 +64,7 @@ import jdk.internal.access.SharedSecrets;
 // AbstractPipeline의 참조(객체) 타입 전문화 버전으로, Stream<T> 인터페이스를 구현한다.
 // filter, map, flatMap 등 모든 참조 타입 중간 연산과
 // forEach, collect, reduce 등 터미널 연산이 여기 정의된다.
+// ReferencePipeline은 추상 클래스이고, 실제 stage는 주로 StatelessOp 또는 StatefulOp의 익명/구체 서브클래스
 //
 // 서브클래스 구조:
 //   Head          — stream()을 통해 생성되는 최초 소스 스테이지
@@ -821,6 +822,7 @@ abstract class ReferencePipeline<P_IN, P_OUT>
      * @param <E_OUT> type of elements in produced by this stage
      * @since 1.8
      */
+    // 소스를 표현하는 Head
     // [소스 스테이지 — Collection.stream()이 반환하는 최초 파이프라인 노드]
     // Head는 opIsStateful()과 opWrapSink()를 지원하지 않는다 (UnsupportedOperationException).
     // 소스에 연산이 없을 때 forEach/forEachOrdered를 spliterator.forEachRemaining()으로 최적화한다.
