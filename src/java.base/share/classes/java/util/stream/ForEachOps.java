@@ -156,6 +156,9 @@ final class ForEachOps {
         @Override
         public <S> Void evaluateParallel(PipelineHelper<T> helper,
                                          Spliterator<S> spliterator) {
+            // invoke()로 루트 CountedCompleter를 시작한다. 내부의 fork()는 현재
+            // 스레드가 ForkJoin worker이면 그 worker의 pool을, 아니면 common pool을
+            // 사용하므로 parallel() 자체가 특정 pool을 직접 생성/선택하지는 않는다.
             if (ordered)
                 new ForEachOrderedTask<>(helper, spliterator, this).invoke();
             else
@@ -309,6 +312,8 @@ final class ForEachOps {
                     forkRight = true;
                     taskToFork = leftTask;
                 }
+                // fork된 쪽은 다른 worker가 훔쳐 실행할 수 있고, task가 가리키는
+                // 반대쪽은 현재 worker가 루프에서 계속 분할/처리한다.
                 taskToFork.fork();
                 sizeEstimate = rightSplit.estimateSize();
             }

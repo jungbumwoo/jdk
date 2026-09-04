@@ -125,6 +125,9 @@ public interface BaseStream<T, S extends BaseStream<T, S>>
      *
      * @return a parallel stream
      */
+    // 이 인터페이스 메서드는 실행을 시작하지 않는다. 기본 Stream 구현의
+    // AbstractPipeline.parallel()이 파이프라인의 parallel 플래그만 설정하고,
+    // 실제 분할/실행은 터미널 연산이 호출될 때 시작된다.
     S parallel();
 
     /**

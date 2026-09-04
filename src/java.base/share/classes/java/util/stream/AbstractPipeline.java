@@ -341,10 +341,13 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
     //
     // 흐름:
     // 1. linkedOrConsumed = true 로 소비 마킹 (두 번 호출 방지)
-    // 2. sourceSpliterator()로 소스를 확보 (지연된 Supplier가 있다면 이 시점에 실체화됨)
+    // 2. sourceSpliterator()로 소스를 확보 (지연된 Supplier가 있다면 이 시점에 실체화됨).
+    //    stateful 중간 연산이 있는 병렬 파이프라인이면 해당 단계까지 평가한
+    //    Spliterator가 반환되며, 이후의 병렬 분할은 이 Spliterator를 대상으로 한다.
     // 3. 순차(sequential)이면 terminalOp.evaluateSequential() 호출
     //    병렬(parallel)이면 terminalOp.evaluateParallel() → ForkJoin 태스크로 분기
-    // Q. terminal operation이 실행되면 여기 evaluate가 어떻게 실행될 수 있는건지?
+    // ReferencePipeline.forEach(), reduce(), collect() 같은 터미널 연산이
+    // TerminalOp 구현을 만든 뒤 이 메서드를 직접 호출한다.
     final <R> R evaluate(TerminalOp<E_OUT, R> terminalOp) {
         assert getOutputShape() == terminalOp.inputShape();
         if (linkedOrConsumed)
@@ -431,6 +434,9 @@ abstract class AbstractPipeline<E_IN, E_OUT, S extends BaseStream<E_OUT, S>>
     @Override
     @SuppressWarnings("unchecked")
     public final S parallel() {
+        // 중간 연산마다 복사하지 않고 모든 stage가 공유하는 sourceStage에 기록한다.
+        // 여기서는 pool이나 task를 만들지 않는다. evaluate()가 이 플래그를 읽어
+        // TerminalOp.evaluateParallel()을 선택할 때 비로소 병렬 평가가 시작된다.
         sourceStage.parallel = true;
         return (S) this;
     }

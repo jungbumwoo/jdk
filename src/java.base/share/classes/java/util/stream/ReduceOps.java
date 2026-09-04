@@ -969,7 +969,8 @@ final class ReduceOps {
         @Override
         public <P_IN> R evaluateParallel(PipelineHelper<T> helper,
                                          Spliterator<P_IN> spliterator) {
-            // 병렬 실행: ForkJoin 태스크 생성 → invoke()로 동기 실행 → 결과 반환
+            // 병렬 실행: ForkJoin 태스크 생성 → invoke()로 완료를 기다림 → 결과 반환.
+            // 실제 분할과 fork는 상위 AbstractTask.compute()에서 수행한다.
             return new ReduceTask<>(this, helper, spliterator).invoke().get();
         }
     }

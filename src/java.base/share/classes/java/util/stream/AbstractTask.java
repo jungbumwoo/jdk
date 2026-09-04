@@ -176,9 +176,12 @@ abstract class AbstractTask<P_IN, P_OUT, R,
     public static int getLeafTarget() {
         Thread t = Thread.currentThread();
         if (t instanceof ForkJoinWorkerThread) {
+            // 병렬 Stream을 사용자 ForkJoinPool의 worker 안에서 실행했다면 그 pool의
+            // parallelism을 사용한다. 따라서 항상 common pool만 사용하는 것은 아니다.
             return ((ForkJoinWorkerThread) t).getPool().getParallelism() << 2;
         }
         else {
+            // 일반 스레드에서 시작한 통상적인 경우에는 common pool 기준으로 계산한다.
             return LEAF_TARGET;
         }
     }
@@ -342,10 +345,13 @@ abstract class AbstractTask<P_IN, P_OUT, R,
                 task = rightChild;
                 taskToFork = leftChild;
             }
-            // 한쪽은 fork하고 다른 쪽은 현재 스레드가 계속 처리
+            // 한쪽은 fork하여 다른 worker가 훔쳐 갈 수 있게 하고, 다른 쪽은 현재
+            // worker가 루프에서 계속 처리한다. 방향을 번갈아 편향된 분할을 완화한다.
             taskToFork.fork();
             sizeEstimate = rs.estimateSize();
         }
+        // leaf 하나의 범위에서는 더 병렬화하지 않고 파이프라인의 Sink 체인을
+        // 현재 스레드에서 순차 실행한다. 완료 신호는 부모 방향으로 전파된다.
         task.setLocalResult(task.doLeaf());
         task.tryComplete();
     }
