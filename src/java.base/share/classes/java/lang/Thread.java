@@ -1467,6 +1467,10 @@ public class Thread implements Runnable {
             // zero status corresponds to state "NEW".
             if (holder.threadStatus != 0)
                 throw new IllegalThreadStateException();
+            // [Platform thread/OS mapping 메모]
+            // ForkJoinWorkerThread도 이 경로를 탄다. start0는 Thread.c에서
+            // JVM_StartThread에 연결되며, HotSpot JavaThread와 native OS
+            // thread를 새로 만든다. run()을 직접 호출하면 이 과정이 없다.
             start0();
         }
     }

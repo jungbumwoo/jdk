@@ -640,6 +640,9 @@ public abstract class ForkJoinTask<V> implements Future<V>, Serializable {
      * @return {@code this}, to simplify usage
      */
     public final ForkJoinTask<V> fork() {
+        // worker 안에서 fork하면 현재 worker deque의 top에 넣어 빠른 LIFO
+        // 실행과 반대편 base에서의 steal을 허용한다. 외부 thread에서 호출하면
+        // commonPool의 공유 submission queue로 들어간다.
         Thread t; ForkJoinWorkerThread wt;
         ForkJoinPool p; ForkJoinPool.WorkQueue q; boolean internal;
         if (internal =

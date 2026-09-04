@@ -36,6 +36,8 @@
 #define ARRAY_LENGTH(a) (sizeof(a)/sizeof(a[0]))
 
 static JNINativeMethod methods[] = {
+    /* Thread.start0의 Java -> HotSpot 경계. JVM_StartThread가 Java Thread
+       객체에 대응하는 VM JavaThread와 native OS thread를 생성한다. */
     {"start0",           "()V",        (void *)&JVM_StartThread},
     {"setPriority0",     "(I)V",       (void *)&JVM_SetThreadPriority},
     {"yield0",           "()V",        (void *)&JVM_Yield},

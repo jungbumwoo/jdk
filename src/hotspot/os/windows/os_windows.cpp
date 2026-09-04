@@ -746,6 +746,8 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
   int trials_remaining = 4;
   DWORD next_delay_ms = 1;
   while (true) {
+    // JavaThread 하나에 대응하는 Windows native thread를 실제 생성하는
+    // 지점. ForkJoin worker도 OS thread와 1:1이고 task들만 재사용된다.
     thread_handle =
       (HANDLE)_beginthreadex(nullptr,
                              (unsigned)stack_size,

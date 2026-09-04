@@ -671,6 +671,8 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
     int trials_remaining = 4;
     useconds_t next_delay = 1000;
     while (true) {
+      // JavaThread 하나에 대응하는 BSD/macOS pthread를 실제 생성하는 지점.
+      // ForkJoin worker도 OS thread와 1:1이고 여러 task가 그 위에서 실행된다.
       ret = pthread_create(&tid, &attr, (void* (*)(void*)) thread_native_entry, thread);
 
       if (ret != EAGAIN) {

@@ -1253,6 +1253,14 @@ public class ForkJoinPool extends AbstractExecutorService
      * submission. See above for descriptions and algorithms.
      */
     static final class WorkQueue {
+        /*
+         * [ForkJoin 동작 메모]
+         * owner가 있는 큐는 worker 전용 큐다. owner는 top 쪽에서 보통
+         * LIFO로 push/pop하여 방금 분할한 작은 작업을 먼저 처리하고, 다른
+         * worker(stealer)는 base 쪽에서 FIFO로 poll하여 오래된 큰 작업을
+         * 가져간다. owner가 null인 짝수 슬롯의 큐는 외부 submitter들이
+         * 잠깐 phase lock을 잡고 함께 쓰는 submission queue다.
+         */
         // fields declared in order of their likely layout on most VMs
         final ForkJoinWorkerThread owner; // null if shared
         ForkJoinTask<?>[] array;   // the queued tasks; power of 2 size
@@ -1335,6 +1343,8 @@ public class ForkJoinPool extends AbstractExecutorService
          * @throws RejectedExecutionException if array could not be resized
          */
         final void push(ForkJoinTask<?> task, ForkJoinPool pool, boolean internal) {
+            // owner의 로컬 fork와 외부 submit 모두 여기로 모인다. 비어 있던
+            // 큐에 일이 생기면 signalWork가 idle worker를 깨우거나 새로 만든다.
             int s = top, b = base, m, cap, room; ForkJoinTask<?>[] a, na;
             if ((a = array) != null && (cap = a.length) > 0) { // else disabled
                 int k = (m = cap - 1) & s;
@@ -1483,6 +1493,8 @@ public class ForkJoinPool extends AbstractExecutorService
          * Polls for a task. Used only by non-owners.
          */
         final ForkJoinTask<?> poll() {
+            // 훔치는 쪽은 base의 같은 슬롯을 두고 경쟁하므로 CAS 성공자만
+            // task를 얻는다. top을 사용하는 owner의 localPop과 반대쪽이다.
             for (int pb = -1, b; ; pb = b) {       // track progress
                 ForkJoinTask<?> t; int cap, nb; long k; ForkJoinTask<?>[] a;
                 if ((a = array) == null || (cap = a.length) <= 0)
@@ -1513,6 +1525,8 @@ public class ForkJoinPool extends AbstractExecutorService
          * Runs the given task, as well as remaining local tasks
          */
         final void topLevelExec(ForkJoinTask<?> task, int fifo) {
+            // 훔친 task가 실행 중 fork한 후속 작업은 이 worker의 로컬 큐에
+            // 쌓인다. 첫 task 뒤에 로컬 큐까지 비우므로 캐시 지역성이 높다.
             while (task != null) {
                 task.doExec();
                 task = (fifo != 0) ? localPoll() : localPop();
@@ -1722,6 +1736,16 @@ public class ForkJoinPool extends AbstractExecutorService
     @jdk.internal.vm.annotation.Contended("fjpctl") // colocate
     int parallelism;                     // target number of workers
 
+    /*
+     * [ForkJoin 동작 메모]
+     * parallelism은 동시에 CPU 작업을 수행시키려는 목표치이지 미리 만들어
+     * 두는 고정 OS thread 수가 아니다. 실제 worker는 요청 시 생성된다.
+     * ctl 한 word에는 released(active 후보) 수, 전체 worker 수, idle-worker
+     * Treiber stack의 head가 함께 들어가므로 생성/휴면/재개 결정을 CAS 한
+     * 번으로 일관되게 바꿀 수 있다. blocking 보상 때문에 전체 worker 수는
+     * parallelism보다 커질 수 있다.
+     */
+
     // Support for atomic operations
     private static final Unsafe U;
     private static final long CTL;
@@ -1810,6 +1834,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * @return true if successful
      */
     private boolean createWorker() {
+        // 여기서 만드는 객체는 Thread의 subclass인 platform thread다.
+        // start() 이후의 OS thread 생성 경로는 Thread.start0 ->
+        // JVM_StartThread -> JavaThread -> os::create_thread로 이어진다.
         ForkJoinWorkerThreadFactory fac = factory;
         SharedThreadContainer ctr = container;
         Throwable ex = null;
@@ -1847,6 +1874,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * @param w caller's WorkQueue
      */
     final void registerWorker(WorkQueue w) {
+        // start()로 새 platform/OS thread가 실제 실행을 시작한 뒤 그 thread가
+        // 자신의 WorkQueue를 홀수 슬롯에 게시한다(외부 큐는 짝수 슬롯).
         if (w != null) {
             w.array = new ForkJoinTask<?>[INITIAL_QUEUE_CAPACITY];
             ThreadLocalRandom.localInit();
@@ -1899,6 +1928,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * @param ex the exception causing failure, or null if none
      */
     final void deregisterWorker(ForkJoinWorkerThread wt, Throwable ex) {
+        // worker run loop의 최종 정리 지점이다. ctl의 active/total 수와 큐
+        // registry를 함께 정리하고, pool이 계속 돌면 signalWork로 보충한다.
         WorkQueue w = null;                // null if not created
         int phase = 0;                     // 0 if not registered
         if (wt != null && (w = wt.workQueue) != null &&
@@ -1938,6 +1969,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * giving up if array a is nonnull and task at a[k] already taken.
      */
     final void signalWork(ForkJoinTask<?>[] a, int k) {
+        // 1) ctl idle stack이 비어 있지 않으면 가장 최근에 쉰 worker를 pop하여
+        // unpark하고, 2) idle worker가 없고 total < parallelism이면 count를
+        // 먼저 예약한 뒤 createWorker한다. 그래서 submit마다 thread를 만들지 않는다.
         int pc = parallelism;
         for (long c = ctl;;) {
             WorkQueue[] qs = queues;
@@ -2044,6 +2078,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * @param w caller's WorkQueue (may be null on failed initialization)
      */
     final void runWorker(WorkQueue w) {
+        // 각 worker/OS thread가 생존 기간 내내 도는 scheduler loop다.
+        // 무작위 시작점과 홀수 step으로 모든 큐를 순회하고 base에서 steal한다.
         if (w != null && w.phase != 0) {                  // else unregistered
             WorkQueue[] qs;
             int r = w.stackPred;                          // seed from registerWorker
@@ -2117,6 +2153,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * @return nonzero if inactive
      */
     private int deactivate(WorkQueue w, int taken) {
+        // 한 바퀴 이상 안정적으로 일이 없으면 worker를 ctl의 idle stack에
+        // 넣고 released count를 내린다. 아직 OS thread 자체를 없애지는 않는다.
         int inactive = 0, phase;
         if (w != null && (inactive = (phase = w.phase) & IDLE) == 0) {
             long sp = (phase + (IDLE << 1)) & LMASK, pc, c;
@@ -2172,6 +2210,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * @return 0 if now active
      */
     private int awaitWork(WorkQueue w) {
+        // idle stack에 등록된 뒤 Unsafe.park로 현재 OS thread를 재운다.
+        // signalWork의 Unsafe.unpark가 깨우며, 여분 worker는 keepAlive 만료 시
+        // tryTrim을 거쳐 run loop를 빠져나가고 deregister된다.
         int inactive = 0, phase;
         if (w != null) {                          // always true; hoist checks
             long waitTime = (w.source == INVALID_ID) ? 0L : keepAlive;
@@ -2273,6 +2314,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * @return UNCOMPENSATE: block then adjust, 0: block, -1 : retry
      */
     private int tryCompensate(long c) {
+        // join/managedBlock 등으로 worker가 멈추기 직전의 보상 정책이다.
+        // idle worker 재개 -> active count만 감소 -> 허용 범위 내 spare worker
+        // 생성 순으로 시도하여, blocking 중에도 실행 가능한 병렬성을 보존한다.
         Predicate<? super ForkJoinPool> sat;
         long b = config;
         int pc        = parallelism,                    // unpack fields
@@ -2655,6 +2699,8 @@ public class ForkJoinPool extends AbstractExecutorService
      *        should be thrown when shutdown
      */
     final WorkQueue externalSubmissionQueue(boolean rejectOnShutdown) {
+        // pool 밖의 일반/가상 thread는 worker 로컬 큐가 없으므로 probe 값으로
+        // 고른 공유 submission queue(queues의 짝수 슬롯)를 잠가 사용한다.
         int r;
         if ((r = ThreadLocalRandom.getProbe()) == 0) {
             ThreadLocalRandom.localInit();   // initialize caller's probe
@@ -2684,6 +2730,9 @@ public class ForkJoinPool extends AbstractExecutorService
     }
 
     private <T> ForkJoinTask<T> poolSubmit(boolean signalIfEmpty, ForkJoinTask<T> task) {
+        // 같은 pool의 worker가 제출하면 자기 deque로, 그 밖의 caller가
+        // 제출하면 공유 submission queue로 보낸다. carrier를 검사하므로
+        // virtual thread 자체를 ForkJoin worker로 오인하지 않는다.
         Thread t; ForkJoinWorkerThread wt; WorkQueue q; boolean internal;
         if (((t = JLA.currentCarrierThread()) instanceof ForkJoinWorkerThread) &&
             (wt = (ForkJoinWorkerThread)t).pool == this) {
@@ -3137,6 +3186,9 @@ public class ForkJoinPool extends AbstractExecutorService
             }
         } catch (Exception ignore) {
         }
+        // 별도 property가 없으면 commonPool의 목표 병렬성은 가용 CPU 수 - 1
+        // (최소 1)이다. 호출 thread가 join 중 계산에 참여할 수 있음을 감안한
+        // 기본값이며, 실제 worker/OS thread는 signalWork가 필요할 때 만든다.
         if (preset == 0)
             pc = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
         int p = Math.min(pc, MAX_CAP);

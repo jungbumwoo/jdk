@@ -62,6 +62,13 @@ public class ForkJoinWorkerThread extends Thread {
      * of class ForkJoinPool.
      *
      * This class just maintains links to its pool and WorkQueue.
+     *
+     * [ForkJoin 동작 메모]
+     * 이 클래스는 virtual thread가 아니라 Thread를 직접 상속한 platform
+     * thread다. HotSpot의 일반적인 1:1 모델에서 ForkJoinWorkerThread 객체
+     * 하나는 실행 중 JavaThread 하나 및 OS native thread 하나에 대응한다.
+     * pool은 task마다 thread를 만들지 않고 이 장수 worker들의 WorkQueue에
+     * task를 배치하며, 일이 없을 때 같은 thread를 park했다가 재사용한다.
      */
 
     final ForkJoinPool pool;                // the pool this thread works in
@@ -73,6 +80,8 @@ public class ForkJoinWorkerThread extends Thread {
     ForkJoinWorkerThread(ThreadGroup group, ForkJoinPool pool,
                          boolean useSystemClassLoader,
                          boolean clearThreadLocals) {
+        // WorkQueue와 Java Thread 객체만 구성한다. 대응 OS thread는 아직
+        // 없으며, ForkJoinPool.createWorker에서 start()할 때 생성된다.
         super(group, null, pool.nextWorkerThreadName(), 0L, !clearThreadLocals);
         UncaughtExceptionHandler handler = (this.pool = pool).ueh;
         this.workQueue = new ForkJoinPool.WorkQueue(this, 0, (int)pool.config,
@@ -177,6 +186,8 @@ public class ForkJoinWorkerThread extends Thread {
      * {@link ForkJoinTask}s.
      */
     public void run() {
+        // 새 OS thread의 진입점. 큐 등록 -> 사용자 초기화 hook -> pool의
+        // work-stealing loop 순으로 실행하고, 어떤 종료 경로에서도 해제한다.
         Throwable exception = null;
         ForkJoinPool p = pool;
         ForkJoinPool.WorkQueue w = workQueue;

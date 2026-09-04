@@ -649,6 +649,9 @@ void JavaThread::block_if_vm_exited() {
 JavaThread::JavaThread(ThreadFunction entry_point, size_t stack_sz, MemTag mem_tag) : JavaThread(mem_tag) {
   set_entry_point(entry_point);
   // Create the native thread itself.
+  // ForkJoin worker를 포함한 platform thread는 여기서 JavaThread별로
+  // os::create_thread를 한 번 호출한다. 구현은 OS별 파일로 내려가며
+  // POSIX 계열은 pthread_create, Windows는 _beginthreadex를 사용한다.
   // %note runtime_23
   os::ThreadType thr_type = os::java_thread;
   thr_type = entry_point == &CompilerThread::thread_entry ? os::compiler_thread :

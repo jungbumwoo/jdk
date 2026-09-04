@@ -2708,6 +2708,10 @@ static void thread_entry(JavaThread* thread, TRAPS) {
 
 
 JVM_ENTRY(void, JVM_StartThread(JNIEnv* env, jobject jthread))
+  // [Platform thread/OS mapping 메모]
+  // ForkJoinWorkerThread.start0도 여기로 들어온다. Java 객체 하나에 대한
+  // HotSpot JavaThread를 만들고 prepare로 연결한 뒤 아래 Thread::start에서
+  // 이미 생성되어 대기 중인 native OS thread를 실제 실행 가능하게 한다.
 #if INCLUDE_CDS
   if (CDSConfig::allow_only_single_java_thread()) {
     // During java -Xshare:dump, if we allow multiple Java threads to

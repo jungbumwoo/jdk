@@ -1119,6 +1119,9 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
     int trials_remaining = 4;
     useconds_t next_delay = 1000;
     while (true) {
+      // JavaThread 하나에 대응하는 Linux pthread(커널 스케줄링 단위)를
+      // 실제 생성하는 지점. 따라서 ForkJoin worker도 실행 중에는 OS
+      // thread와 1:1이며, task들만 그 장수 thread 위에서 교대로 실행된다.
       ret = pthread_create(&tid, &attr, (void* (*)(void*)) thread_native_entry, thread);
 
       if (ret != EAGAIN) {
