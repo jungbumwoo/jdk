@@ -28,3 +28,38 @@ submit → 큐 적재 → signalWork → Java Thread 생성/start → runWorker 
 - Java→HotSpot 경계: src/java.base/share/classes/java/lang/Thread.java:1470, src/hotspot/share/prims/jvm.cpp:2711
 - 실제 OS thread 생성: src/hotspot/share/runtime/javaThread.cpp:652, src/hotspot/os/bsd/os_bsd.cpp:674, src/hotspot/os/linux/os_linux.cpp:1122, src/hotspot/os/windows/
   os_windows.cpp:749
+
+----
+
+Q. ForkJoinPool이 아닌 common pool은 언제, 어떻게, 어디서 생성되고 관리되는지?
+
+common pool도 ForkJoinPool입니다. 별도 타입이 아니라 JVM 프로세스 전체에서 공유되는 정적 싱글턴 인스턴스입니다.
+
+생성과 관리 흐름은 다음과 같습니다.
+
+1. ForkJoinPool 클래스가 처음 초기화됩니다.
+2. 정적 초기화 블록에서 new ForkJoinPool((byte) 0)이 정확히 한 번 실행됩니다.
+3. 이때 pool 설정과 큐 자료구조만 생성되고 worker thread는 아직 생성되지 않습니다.
+4. 작업이 제출되면 WorkQueue.push()가 signalWork()를 호출합니다.
+5. signalWork()는 유휴 worker를 깨우거나 createWorker()로 새 worker를 지연 생성합니다.
+6. worker는 runWorker()에서 자기 큐를 처리하거나 다른 큐의 작업을 steal합니다.
+7. 유휴 worker는 awaitWork()에서 대기하고, 필요하면 keep-alive 정책에 따라 정리됩니다.
+8. common pool에는 shutdown()과 shutdownNow()가 적용되지 않으며 JVM 종료까지 유지됩니다.
+
+주요 주석 위치:
+
+- 전체 생성·관리 흐름: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:1706
+- 실제 worker 생성: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:1848
+- worker 활성화 및 지연 생성: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:1983
+- 유휴 worker 관리: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:2224
+- common pool 전용 생성자: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:3169
+- 싱글턴 조회: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:3239
+- shutdown() 무시 처리: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:4188
+- 실제 정적 생성 코드: src/java.base/share/classes/java/util/concurrent/ForkJoinPool.java:4518
+
+기본 parallelism은 별도 시스템 프로퍼티가 없으면 일반적으로 availableProcessors() - 1이며, 아래 프로퍼티로 설정할 수 있습니다.
+
+- java.util.concurrent.ForkJoinPool.common.parallelism
+- java.util.concurrent.ForkJoinPool.common.maximumSpares
+- java.util.concurrent.ForkJoinPool.common.threadFactory
+- java.util.concurrent.ForkJoinPool.common.exceptionHandler

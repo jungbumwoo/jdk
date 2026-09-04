@@ -1703,6 +1703,18 @@ public class ForkJoinPool extends AbstractExecutorService
      * to paranoically avoid potential initialization circularities
      * as well as to simplify generated code.
      */
+    // [common pool의 생성/관리 흐름]
+    // ForkJoinPool 클래스 초기화
+    //   -> 파일 끝 static 블록에서 new ForkJoinPool((byte) 0)을 정확히 한 번 실행
+    //   -> common 필드가 JVM 프로세스 전체에서 공유하는 ForkJoinPool 인스턴스를 보관
+    // 작업 제출
+    //   -> 외부 스레드의 ForkJoinTask.fork()가 common의 submission queue에 push
+    //   -> WorkQueue.push() -> signalWork()가 idle worker를 깨우거나 worker를 지연 생성
+    // 작업 실행/대기
+    //   -> worker는 runWorker()에서 자기 큐를 실행하고 다른 큐의 작업을 steal
+    //   -> 일이 없으면 awaitWork()에서 park되고, 필요하면 keepAlive 정책으로 정리
+    // 종료
+    //   -> common에는 shutdown()/shutdownNow()가 적용되지 않고 JVM 종료까지 유지
     static final ForkJoinPool common;
 
     /**
@@ -3155,6 +3167,9 @@ public class ForkJoinPool extends AbstractExecutorService
      * overridden by system properties
      */
     private ForkJoinPool(byte forCommonPoolOnly) {
+        // 이 생성자는 common pool의 설정과 queue registry만 만든다. worker thread는
+        // 여기서 미리 만들지 않으며, 작업이 들어온 뒤 signalWork()가 필요할 때 만든다.
+        // ForkJoinPool 클래스의 static 초기화 중 한 번만 호출된다.
         String name = "ForkJoinPool.commonPool";
         ForkJoinWorkerThreadFactory fac = defaultForkJoinWorkerThreadFactory;
         UncaughtExceptionHandler handler = null;
@@ -3222,6 +3237,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * @since 1.8
      */
     public static ForkJoinPool commonPool() {
+        // 호출할 때마다 pool을 만드는 factory 메서드가 아니다. ForkJoinPool 클래스가
+        // 처음 초기화될 때 static 블록이 생성해 둔 동일한 인스턴스를 반환한다.
         // assert common != null : "static init error";
         return common;
     }
@@ -4169,6 +4186,8 @@ public class ForkJoinPool extends AbstractExecutorService
      * may not be rejected.
      */
     public void shutdown() {
+        // workerNamePrefix == null은 common pool을 나타낸다. 여러 JDK 기능과
+        // 애플리케이션이 공유하므로 한 사용자가 전체 pool을 종료할 수 없게 한다.
         if (workerNamePrefix != null) // not common pool
             tryTerminate(false, true);
     }
@@ -4496,6 +4515,9 @@ public class ForkJoinPool extends AbstractExecutorService
     }
 
     static {
+        // ForkJoinPool을 처음 active use할 때 JVM이 수행하는 클래스 초기화다.
+        // 예: ForkJoinPool.commonPool() 호출 또는 외부 스레드의 ForkJoinTask.fork().
+        // 클래스 초기화 락이 한 번만 실행되도록 보장하므로 common도 하나만 생성된다.
         U = Unsafe.getUnsafe();
         Class<ForkJoinPool> klass = ForkJoinPool.class;
         try {
@@ -4532,6 +4554,8 @@ public class ForkJoinPool extends AbstractExecutorService
             });
         defaultForkJoinWorkerThreadFactory =
             new DefaultForkJoinWorkerThreadFactory();
+        // pool 자료구조만 초기화한다. 실제 commonPool-worker-* thread의 생성은
+        // 첫 작업이 queue에 들어가 signalWork()가 createWorker()를 부를 때까지 지연된다.
         common = new ForkJoinPool((byte)0);
     }
 }
